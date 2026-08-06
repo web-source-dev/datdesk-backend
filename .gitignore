@@ -5,6 +5,15 @@ uploads/cookies/*
 *.log
 .DS_Store
 
+dist/   
+resources/  
+out/  
+updates/
+
+
+
+
+
 
 .env
 .env.local
