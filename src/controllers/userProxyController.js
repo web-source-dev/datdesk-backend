@@ -1,5 +1,4 @@
 const User = require('../models/User');
-const crypto = require('crypto');
 
 function normalizeCredentials(body = {}) {
   if (typeof body === 'string' || (body.host && String(body.host).includes(':') && !body.port)) {
@@ -138,16 +137,8 @@ async function deleteMyProxy(req, res) {
 
 async function unlockProxyPanel(req, res) {
   try {
-    const expected = String(process.env.PROXY_PANEL_PASSWORD || 'Horizon@Proxy#2026');
-    const provided = String(req.body?.password || '');
-    const expectedBuf = Buffer.from(expected);
-    const providedBuf = Buffer.from(provided);
-
-    let ok = false;
-    if (expectedBuf.length === providedBuf.length) {
-      ok = crypto.timingSafeEqual(expectedBuf, providedBuf);
-    }
-    if (!ok) {
+    const { verifyStaffPanelPassword } = require('../utils/staffPanel');
+    if (!verifyStaffPanelPassword(req.body?.password)) {
       return res.status(401).json({ success: false, message: 'Incorrect password' });
     }
     return res.json({ success: true });

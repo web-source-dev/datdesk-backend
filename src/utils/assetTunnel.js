@@ -15,7 +15,26 @@ function pickAgent(url) {
 }
 
 function publicBaseFromReq(req) {
-  return `${req.protocol}://${req.get('host')}`.replace(/\/+$/, '');
+  const fromEnv = (process.env.PUBLIC_BASE_URL || process.env.UPDATE_PUBLIC_BASE_URL || '')
+    .trim()
+    .replace(/\/+$/, '');
+  if (fromEnv) return fromEnv;
+
+  const xfProto = String(req.headers['x-forwarded-proto'] || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '')
+    .split(',')[0]
+    .trim();
+  let protocol = xfProto || req.protocol || 'https';
+  const isLocal =
+    !host ||
+    host.startsWith('localhost') ||
+    host.startsWith('127.0.0.1') ||
+    /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(host);
+  if (protocol === 'http' && !isLocal) protocol = 'https';
+  return `${protocol}://${host}`.replace(/\/+$/, '');
 }
 
 function rewriteFeedDownloadHosts(body, primaryBase, publicBase) {

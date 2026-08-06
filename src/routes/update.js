@@ -12,6 +12,8 @@ const { authenticateToken, requireAdmin } = require('../middleware/auth');
 router.get('/check', checkUpdate);
 router.get('/feed', getUpdateFeed);
 router.get('/feed/latest.yml', getUpdateFeed);
+// electron-updater resolves feed?... → /update/latest.yml when the base path has no trailing slash
+router.get('/latest.yml', getUpdateFeed);
 
 router.get('/config', authenticateToken, requireAdmin, getUpdateConfig);
 router.put('/config/:app', authenticateToken, requireAdmin, setUpdateConfig);

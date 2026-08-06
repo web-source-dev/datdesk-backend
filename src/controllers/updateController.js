@@ -9,6 +9,34 @@ const { shouldTunnelAssets, tunnelUpdateRequest } = require('../utils/assetTunne
 const DEFAULT_APP = process.env.DEFAULT_UPDATE_APP || 'datdesk';
 
 /**
+ * Public origin for absolute download URLs in latest.yml.
+ * Behind nginx, req.protocol is often "http" even when clients use HTTPS, which
+ * makes electron-updater follow http→https redirects and can fail with 405.
+ */
+function getPublicBaseUrl(req) {
+  const fromEnv = (process.env.PUBLIC_BASE_URL || process.env.UPDATE_PUBLIC_BASE_URL || '')
+    .trim()
+    .replace(/\/+$/, '');
+  if (fromEnv) return fromEnv;
+
+  const xfProto = String(req.get('x-forwarded-proto') || '')
+    .split(',')[0]
+    .trim()
+    .toLowerCase();
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '')
+    .split(',')[0]
+    .trim();
+  let protocol = xfProto || req.protocol || 'https';
+  const isLocal =
+    !host ||
+    host.startsWith('localhost') ||
+    host.startsWith('127.0.0.1') ||
+    /^(\d{1,3}\.){3}\d{1,3}(:\d+)?$/.test(host);
+  if (protocol === 'http' && !isLocal) protocol = 'https';
+  return `${protocol}://${host}`;
+}
+
+/**
  * Sanitize the `app` query/param so each application gets its own update folder.
  * Multiple desktop apps (e.g. dat-hub, dat-go) share this backend, so updates are
  * namespaced under updates/<app>/<platform>/. Returns:
@@ -199,7 +227,9 @@ async function checkUpdate(req, res) {
       sha512: latestData.sha512 || null,
       size: fileSize,
       // For electron-updater generic provider
-      url: fileName ? `${req.protocol}://${req.get('host')}/update/download${appSegment}/${platformDir}/${fileName}` : null
+      url: fileName
+        ? `${getPublicBaseUrl(req)}/update/download${appSegment}/${platformDir}/${fileName}`
+        : null
     });
 
   } catch (error) {
@@ -390,7 +420,7 @@ async function getUpdateFeed(req, res) {
       // electron-updater's generic provider accepts absolute URLs, so we rewrite
       // every relative file reference in the manifest to point at our namespaced
       // download route (/update/download/<app>/<platformDir>/<file>).
-      const baseUrl = `${req.protocol}://${req.get('host')}`;
+      const baseUrl = getPublicBaseUrl(req);
       const downloadPrefix = `${baseUrl}/update/download${appSegment}/${platformDir}`;
       const toAbsolute = (relName) => `${downloadPrefix}/${encodeURIComponent(relName)}`;
 

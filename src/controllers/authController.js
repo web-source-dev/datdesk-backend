@@ -2,6 +2,7 @@ const User = require('../models/User');
 const { generateToken, createSessionId } = require('../utils/jwt');
 const { verifyPassword } = require('../utils/password');
 const { enrichUser } = require('./userController');
+const { verifyStaffPanelPassword } = require('../utils/staffPanel');
 
 async function login(req, res) {
   try {
@@ -66,4 +67,20 @@ async function checkSession(req, res) {
   }
 }
 
-module.exports = { login, checkSession };
+/**
+ * POST /auth/staff-unlock
+ * No login required — used by proxy + custom-server panels.
+ * Password must match backend SERVER_PANEL_PASSWORD / PROXY_PANEL_PASSWORD.
+ */
+async function staffUnlock(req, res) {
+  try {
+    if (!verifyStaffPanelPassword(req.body?.password)) {
+      return res.status(401).json({ success: false, message: 'Incorrect password' });
+    }
+    return res.json({ success: true });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message || 'Failed to verify' });
+  }
+}
+
+module.exports = { login, checkSession, staffUnlock };
