@@ -325,11 +325,12 @@ async function updateContainerLabel(container, label) {
 
 async function activateImportedCookie(container, channelInput = 'single') {
   const normalized = String(container || '').toUpperCase();
-  const channel = normalizeCookieChannel(channelInput);
 
-  if (!isValidCookieChannel(channel)) {
+  if (!isValidCookieChannel(channelInput)) {
     throw new Error('Invalid cookie channel.');
   }
+
+  const channel = normalizeCookieChannel(channelInput);
 
   const existingCookie = await findImportedCookie(normalized);
   const preservedActivation = collectActivationFlags(existingCookie);

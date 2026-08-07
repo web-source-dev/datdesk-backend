@@ -83,6 +83,7 @@ async function uploadCookie(req, res) {
       isActiveSingle: false,
       isActiveDouble: false,
       isActiveMulti: false,
+      isActiveSwiftSolutions: false,
       isActiveTest: false
     });
 
@@ -103,10 +104,13 @@ async function activateCookie(req, res) {
       return res.status(404).json({ message: 'Cookie not found' });
     }
 
-    const channel = normalizeCookieChannel(req.body.channel || 'single');
-    if (!isValidCookieChannel(channel)) {
-      return res.status(400).json({ message: 'Invalid channel. Use single, double, multi, or test.' });
+    const rawChannel = req.body.channel || 'single';
+    if (!isValidCookieChannel(rawChannel)) {
+      return res.status(400).json({
+        message: 'Invalid channel. Use single, double, multi, swiftSolutions, or test.'
+      });
     }
+    const channel = normalizeCookieChannel(rawChannel);
 
     const activeField = getActiveFieldForChannel(channel);
 
@@ -140,10 +144,13 @@ async function deactivateCookie(req, res) {
       return res.status(404).json({ message: 'Cookie not found' });
     }
 
-    const channel = normalizeCookieChannel(req.body.channel || 'single');
-    if (!isValidCookieChannel(channel)) {
-      return res.status(400).json({ message: 'Invalid channel. Use single, double, multi, or test.' });
+    const rawChannel = req.body.channel || 'single';
+    if (!isValidCookieChannel(rawChannel)) {
+      return res.status(400).json({
+        message: 'Invalid channel. Use single, double, multi, swiftSolutions, or test.'
+      });
     }
+    const channel = normalizeCookieChannel(rawChannel);
 
     const activeField = getActiveFieldForChannel(channel);
     cookie[activeField] = false;

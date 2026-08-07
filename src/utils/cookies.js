@@ -125,7 +125,8 @@ async function getCookieByChannel(channel) {
   const activeField = getActiveFieldForChannel(channel);
   let active = await Cookie.findOne({ [activeField]: true });
 
-  if (!active && channel !== 'test') {
+  // Legacy isActive fallback only for plan channels — not Test / Swift Solutions
+  if (!active && channel !== 'test' && channel !== 'swiftSolutions') {
     active = await Cookie.findOne({ isActive: true });
   }
 
@@ -182,6 +183,7 @@ async function getActiveCookie() {
       { isActiveSingle: true },
       { isActiveDouble: true },
       { isActiveMulti: true },
+      { isActiveSwiftSolutions: true },
       { isActiveTest: true }
     ]
   });

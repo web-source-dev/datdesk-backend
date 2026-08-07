@@ -6,7 +6,7 @@ const { shouldTunnelAssets, tunnelUpdateRequest } = require('../utils/assetTunne
 // Default app for legacy clients that call the update API WITHOUT an `app` param.
 // All currently-released/active installs are DAT GO and send no app param, so we
 // must serve them dat-go updates (this matches the pre-namespacing behaviour).
-const DEFAULT_APP = process.env.DEFAULT_UPDATE_APP || 'datdesk';
+const DEFAULT_APP = process.env.DEFAULT_UPDATE_APP || 'horizon';
 
 /**
  * Public origin for absolute download URLs in latest.yml.
@@ -38,7 +38,7 @@ function getPublicBaseUrl(req) {
 
 /**
  * Sanitize the `app` query/param so each application gets its own update folder.
- * Multiple desktop apps (e.g. dat-hub, dat-go) share this backend, so updates are
+ * Multiple desktop apps (Horizon + Dat Desk) share this backend, so updates are
  * namespaced under updates/<app>/<platform>/. Returns:
  *   - a safe slug string when a valid app is provided
  *   - '' when no app is provided (caller then falls back to DEFAULT_APP)
@@ -86,7 +86,7 @@ async function areUpdatesEnabled(app) {
 }
 
 /**
- * List app slugs that have an updates folder on disk (dat-go, dat-hub, ...).
+ * List app slugs that have an updates folder on disk (datdesk, horizon, ...).
  */
 function listKnownApps() {
   const UPDATE_DIR = process.env.UPDATE_DIR || path.join(__dirname, '../../updates');
@@ -100,9 +100,12 @@ function listKnownApps() {
   }
 }
 
+/** Always expose these desktop channels in admin even before a folder exists. */
+const MANAGED_APPS = ['datdesk', 'horizon', 'swift'];
+
 /**
  * Get update information
- * GET /update/check?platform=win32&arch=x64&version=1.0.0&app=dat-go
+ * GET /update/check?platform=win32&arch=x64&version=1.0.0&app=horizon
  * Returns update metadata for electron-updater
  */
 async function checkUpdate(req, res) {
@@ -553,7 +556,12 @@ async function getUpdateConfig(req, res) {
     const docs = await AppUpdateSetting.find({});
     const enabledByApp = new Map(docs.map((d) => [d.app, d.updatesEnabled !== false]));
 
-    const apps = new Set([DEFAULT_APP, ...listKnownApps(), ...enabledByApp.keys()]);
+    const apps = new Set([
+      DEFAULT_APP,
+      ...MANAGED_APPS,
+      ...listKnownApps(),
+      ...enabledByApp.keys()
+    ]);
     const data = Array.from(apps)
       .sort()
       .map((app) => ({

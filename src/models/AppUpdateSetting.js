@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 
 /**
- * Per-app auto-update switch. One document per app slug (e.g. datdesk).
+ * Per-app auto-update switch. One document per app slug.
+ * Shared backend: `horizon` and `datdesk` are separate channels.
  * When updatesEnabled is false, the update feed reports version 0.0.0 so
  * clients stay on their current build.
  */

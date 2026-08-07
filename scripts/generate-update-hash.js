@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 /**
- * Generate latest.yml for Dat Desk auto-updates (electron-updater).
+ * Generate latest.yml for desktop auto-updates (electron-updater).
+ * Keep Horizon and Dat Desk installers in separate folders:
+ *   backend/updates/horizon/win32-x64/
+ *   backend/updates/datdesk/win32-x64/
  * Usage: node scripts/generate-update-hash.js "<Setup.exe>" [version]
  */
 

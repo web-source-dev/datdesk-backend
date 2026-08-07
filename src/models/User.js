@@ -56,7 +56,11 @@ const userSchema = new mongoose.Schema(
       default: 'https://one.dat.com/search-loads',
       trim: true
     },
-    /** Cookie channel routing (like DATHUB). Test label overrides plan. */
+    /**
+     * Cookie channel routing (like DATHUB).
+     * label=test → Test cookie; label=swiftSolutions → Swift Solutions cookie;
+     * otherwise plan (single|double|multi) selects the channel.
+     */
     plan: {
       type: String,
       enum: ['single', 'double', 'multi'],

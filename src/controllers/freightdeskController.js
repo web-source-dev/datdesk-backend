@@ -36,6 +36,7 @@ async function enrichSessions(sessions = []) {
       isActiveSingle: Boolean(imported?.isActiveSingle),
       isActiveDouble: Boolean(imported?.isActiveDouble),
       isActiveMulti: Boolean(imported?.isActiveMulti),
+      isActiveSwiftSolutions: Boolean(imported?.isActiveSwiftSolutions),
       isActiveTest: Boolean(imported?.isActiveTest),
       isActive: Boolean(imported?.isActive),
       isWorking: Boolean(imported?.isWorking)
@@ -77,11 +78,12 @@ async function importContainer(req, res) {
     const container = String(req.params.container || '').toUpperCase();
     const activate = Boolean(req.body?.activate);
     const forceReimport = req.body?.forceReimport !== false;
-    const channel = normalizeCookieChannel(req.body?.channel || 'single');
+    const rawChannel = req.body?.channel || 'single';
 
-    if (activate && !isValidCookieChannel(channel)) {
+    if (activate && !isValidCookieChannel(rawChannel)) {
       return res.status(400).json({ message: 'Invalid cookie channel.' });
     }
+    const channel = normalizeCookieChannel(rawChannel);
 
     if (activate) {
       const result = await freightdeskImportService.activateImportedCookie(container, channel);

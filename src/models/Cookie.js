@@ -26,6 +26,8 @@ const cookieSchema = new mongoose.Schema(
     isActiveSingle: { type: Boolean, default: false, index: true },
     isActiveDouble: { type: Boolean, default: false, index: true },
     isActiveMulti: { type: Boolean, default: false, index: true },
+    /** Active cookie for users with label=swiftSolutions */
+    isActiveSwiftSolutions: { type: Boolean, default: false, index: true },
     isActiveTest: { type: Boolean, default: false, index: true },
     note: { type: String, trim: true, default: '' }
   },
