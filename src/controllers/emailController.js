@@ -332,7 +332,7 @@ async function oauthCallback(req, res) {
     return res.send(
       `<!doctype html><html><body style="font-family:system-ui;padding:40px;background:#f8fafc;color:#0f172a">
         <h2 style="margin:0 0 8px">Gmail connected</h2>
-        <p style="margin:0 0 16px">Signed in as <strong>${profile.email}</strong>. You can close this window and return to Horizon.</p>
+        <p style="margin:0 0 16px">Signed in as <strong>${profile.email}</strong>. You can close this window and return to Dat Desk.</p>
         <script>setTimeout(()=>window.close(),1200)</script>
       </body></html>`
     );

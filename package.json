@@ -1,12 +1,13 @@
 {
-  "name": "horizon-backend",
+  "name": "datdesk-backend",
   "version": "1.0.0",
-  "description": "Horizon API — auth, cookies, proxies, extensions",
+  "description": "Dat Desk API — shared auth, cookies, proxies, extensions for Dat Desk, Horizon, and Swift",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "seed": "node src/seed.js",
+    "seed:swift-partner-admins": "node scripts/create-swift-partner-admins.js",
     "import:dathub-proxies": "node scripts/import-dathub-proxies.js",
     "import:dathub-proxies:dry": "node scripts/import-dathub-proxies.js --dry-run"
   },

@@ -69,21 +69,79 @@ async function listUsers(req, res) {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const search = (req.query.search || '').trim();
+    const plan = String(req.query.plan || '').trim().toLowerCase();
+    const label = String(req.query.label || '').trim();
+    const role = String(req.query.role || '').trim().toLowerCase();
+    const banned = String(req.query.banned || '').trim().toLowerCase();
+    const proxy = String(req.query.proxy || '').trim().toLowerCase();
+    const cookie = String(req.query.cookie || '').trim().toLowerCase();
+    const openDat = String(req.query.openDat || '').trim().toLowerCase();
 
-    const filter = {
-      // Partner-managed Swift users live in partner-admin, not the main Users table
-      label: { $ne: 'swiftSolutions' }
-    };
-    if (search) {
-      filter.$and = [
-        {
-          $or: [
-            { name: new RegExp(search, 'i') },
-            { email: new RegExp(search, 'i') }
-          ]
-        }
-      ];
+    const conditions = [];
+
+    // Partner-managed Swift users stay out of the main table unless explicitly filtered
+    if (label === 'swiftSolutions') {
+      conditions.push({ label: 'swiftSolutions' });
+    } else if (label === 'test') {
+      conditions.push({ label: 'test' });
+    } else if (label === 'none') {
+      conditions.push({
+        $or: [{ label: '' }, { label: null }, { label: { $exists: false } }]
+      });
+    } else {
+      conditions.push({ label: { $ne: 'swiftSolutions' } });
     }
+
+    if (search) {
+      const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      conditions.push({
+        $or: [{ name: re }, { email: re }, { note: re }]
+      });
+    }
+
+    if (plan === 'single' || plan === 'double' || plan === 'multi') {
+      conditions.push({ plan });
+    }
+
+    if (role === 'admin' || role === 'user') {
+      conditions.push({ role });
+    }
+
+    if (banned === 'true' || banned === '1') {
+      conditions.push({ isBanned: true });
+    } else if (banned === 'false' || banned === '0') {
+      conditions.push({ isBanned: { $ne: true } });
+    }
+
+    if (proxy === 'assigned') {
+      conditions.push({ proxyId: { $ne: null } });
+    } else if (proxy === 'none') {
+      conditions.push({
+        $or: [{ proxyId: null }, { proxyId: { $exists: false } }]
+      });
+    }
+
+    if (cookie === 'assigned') {
+      conditions.push({ assignedCookieId: { $ne: null } });
+    } else if (cookie === 'none') {
+      conditions.push({
+        $or: [{ assignedCookieId: null }, { assignedCookieId: { $exists: false } }]
+      });
+    }
+
+    if (openDat === 'true' || openDat === '1') {
+      conditions.push({
+        $or: [
+          { 'permissions.openDat': true },
+          { 'permissions.openDat': { $exists: false } },
+          { permissions: { $exists: false } }
+        ]
+      });
+    } else if (openDat === 'false' || openDat === '0') {
+      conditions.push({ 'permissions.openDat': false });
+    }
+
+    const filter = conditions.length === 1 ? conditions[0] : { $and: conditions };
 
     const [users, total] = await Promise.all([
       User.find(filter)
@@ -99,7 +157,7 @@ async function listUsers(req, res) {
 
     return res.json({
       users: enriched,
-      pagination: { page, limit, total, pages: Math.ceil(total / limit) }
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 }
     });
   } catch (error) {
     console.error('[USER] List error:', error);

@@ -95,7 +95,7 @@ const userSchema = new mongoose.Schema(
       trim: true,
       default: ''
     },
-    /** Staff Ctrl+Shift+P custom proxy override (Horizon-style) */
+    /** Staff Ctrl+Shift+P custom proxy override */
     customProxy: {
       enabled: { type: Boolean, default: false },
       host: { type: String, default: '' },

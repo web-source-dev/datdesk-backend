@@ -6,7 +6,7 @@ const { shouldTunnelAssets, tunnelUpdateRequest } = require('../utils/assetTunne
 // Default app for legacy clients that call the update API WITHOUT an `app` param.
 // All currently-released/active installs are DAT GO and send no app param, so we
 // must serve them dat-go updates (this matches the pre-namespacing behaviour).
-const DEFAULT_APP = process.env.DEFAULT_UPDATE_APP || 'horizon';
+const DEFAULT_APP = process.env.DEFAULT_UPDATE_APP || 'datdesk';
 
 /**
  * Public origin for absolute download URLs in latest.yml.
@@ -38,7 +38,7 @@ function getPublicBaseUrl(req) {
 
 /**
  * Sanitize the `app` query/param so each application gets its own update folder.
- * Multiple desktop apps (Horizon + Dat Desk) share this backend, so updates are
+ * Multiple desktop apps (Dat Desk, Horizon, Swift) share this backend, so updates are
  * namespaced under updates/<app>/<platform>/. Returns:
  *   - a safe slug string when a valid app is provided
  *   - '' when no app is provided (caller then falls back to DEFAULT_APP)
@@ -124,7 +124,7 @@ async function checkUpdate(req, res) {
     }
 
     // Resolve the per-app update folder (shared backend serves multiple apps).
-    // Legacy clients send no app param -> falls back to DEFAULT_APP (dat-go).
+    // Legacy clients send no app param -> falls back to DEFAULT_APP (datdesk).
     const effectiveApp = resolveApp(req.query.app);
     if (effectiveApp === null) {
       return res.status(400).json({ success: false, message: 'Invalid app identifier' });
@@ -268,7 +268,7 @@ async function downloadUpdate(req, res) {
       });
     }
 
-    // Resolve per-app namespace. Legacy (no app segment) -> DEFAULT_APP (dat-go).
+    // Resolve per-app namespace. Legacy (no app segment) -> DEFAULT_APP (datdesk).
     const effectiveApp = resolveApp(req.params.app);
     if (effectiveApp === null) {
       return res.status(400).json({ success: false, message: 'Invalid app identifier' });
@@ -359,7 +359,7 @@ async function getUpdateFeed(req, res) {
     }
 
     // Resolve the per-app update folder (shared backend serves multiple apps).
-    // Legacy clients send no app param -> falls back to DEFAULT_APP (dat-go).
+    // Legacy clients send no app param -> falls back to DEFAULT_APP (datdesk).
     const effectiveApp = resolveApp(req.query.app);
     if (effectiveApp === null) {
       return res.status(400).json({ success: false, message: 'Invalid app identifier' });

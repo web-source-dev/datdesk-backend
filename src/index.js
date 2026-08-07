@@ -55,7 +55,7 @@ async function start() {
   console.log('[DB] Connected:', uri);
 
   app.listen(PORT, () => {
-    console.log(`[SERVER] Horizon backend listening on http://localhost:${PORT}`);
+    console.log(`[SERVER] Dat Desk backend listening on http://localhost:${PORT}`);
   });
 }
 
