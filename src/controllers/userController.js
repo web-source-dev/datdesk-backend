@@ -71,7 +71,6 @@ async function listUsers(req, res) {
     const search = (req.query.search || '').trim();
     const plan = String(req.query.plan || '').trim().toLowerCase();
     const label = String(req.query.label || '').trim();
-    const role = String(req.query.role || '').trim().toLowerCase();
     const banned = String(req.query.banned || '').trim().toLowerCase();
     const proxy = String(req.query.proxy || '').trim().toLowerCase();
     const cookie = String(req.query.cookie || '').trim().toLowerCase();
@@ -79,7 +78,9 @@ async function listUsers(req, res) {
 
     const conditions = [];
 
-    // Partner-managed Swift users stay out of the main table unless explicitly filtered
+    // Admin accounts are DB-managed — never list them in the admin Users table
+    conditions.push({ role: { $ne: 'admin' } });
+
     if (label === 'swiftSolutions') {
       conditions.push({ label: 'swiftSolutions' });
     } else if (label === 'test') {
@@ -90,9 +91,8 @@ async function listUsers(req, res) {
       conditions.push({
         $or: [{ label: '' }, { label: null }, { label: { $exists: false } }]
       });
-    } else {
-      conditions.push({ label: { $ne: 'swiftSolutions' } });
     }
+    // No label filter → include every non-admin user (including Swift Solutions)
 
     if (search) {
       const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
@@ -103,10 +103,6 @@ async function listUsers(req, res) {
 
     if (plan === 'single' || plan === 'double' || plan === 'multi') {
       conditions.push({ plan });
-    }
-
-    if (role === 'admin' || role === 'user') {
-      conditions.push({ role });
     }
 
     if (banned === 'true' || banned === '1') {
