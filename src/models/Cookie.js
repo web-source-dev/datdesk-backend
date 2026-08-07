@@ -16,6 +16,8 @@ const cookieSchema = new mongoose.Schema(
     fileSize: { type: Number, default: 0 },
     /** FreightDesk / admin label (new, single, double, …) */
     label: { type: String, trim: true, default: 'new', index: true },
+    /** Optional display name for partner dashboard / filters */
+    sessionName: { type: String, trim: true, default: '' },
     /** freightdesk | manual */
     source: { type: String, trim: true, default: 'manual', index: true },
     lastUpdated: { type: Date, default: null },

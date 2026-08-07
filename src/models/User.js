@@ -104,6 +104,8 @@ const userSchema = new mongoose.Schema(
       password: { type: String, default: '' }
     },
     note: { type: String, trim: true, default: '' },
+    phone: { type: String, trim: true, default: '' },
+    anydeskid: { type: String, trim: true, default: '' },
     /** Single active desktop/admin login — new login replaces this and signs out other devices */
     activeSessionId: {
       type: String,

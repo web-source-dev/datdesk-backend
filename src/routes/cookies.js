@@ -10,6 +10,10 @@ const {
   getActiveCookieForUser,
   setCookieWorking
 } = require('../controllers/cookieController');
+const {
+  getDashboardConfig,
+  updateDashboardConfig
+} = require('../controllers/partnerSwiftConfigController');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
 // Keep cookie JSON in memory → MongoDB (no uploads/cookies disk write)
@@ -27,6 +31,19 @@ const upload = multer({
 const router = express.Router();
 
 router.get('/active', authenticateToken, getActiveCookieForUser);
+
+router.get(
+  '/partner-swift/dashboard-config',
+  authenticateToken,
+  requireAdmin,
+  getDashboardConfig
+);
+router.put(
+  '/partner-swift/dashboard-config',
+  authenticateToken,
+  requireAdmin,
+  updateDashboardConfig
+);
 
 router.get('/', authenticateToken, requireAdmin, listCookies);
 router.post('/upload', authenticateToken, requireAdmin, upload.single('file'), uploadCookie);

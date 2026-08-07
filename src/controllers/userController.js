@@ -70,11 +70,18 @@ async function listUsers(req, res) {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const search = (req.query.search || '').trim();
 
-    const filter = {};
+    const filter = {
+      // Partner-managed Swift users live in partner-admin, not the main Users table
+      label: { $ne: 'swiftSolutions' }
+    };
     if (search) {
-      filter.$or = [
-        { name: new RegExp(search, 'i') },
-        { email: new RegExp(search, 'i') }
+      filter.$and = [
+        {
+          $or: [
+            { name: new RegExp(search, 'i') },
+            { email: new RegExp(search, 'i') }
+          ]
+        }
       ];
     }
 

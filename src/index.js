@@ -14,6 +14,7 @@ const extensionRoutes = require('./routes/extensions');
 const updateRoutes = require('./routes/update');
 const freightdeskRoutes = require('./routes/freightdesk');
 const emailRoutes = require('./routes/email');
+const partnerSwiftSolutionsRoutes = require('./routes/partnerSwiftSolutions');
 const { ensureCookiesDir } = require('./utils/cookies');
 const { ensureExtensionsDir } = require('./controllers/extensionController');
 
@@ -38,6 +39,7 @@ app.use('/extension', extensionRoutes);
 app.use('/update', updateRoutes);
 app.use('/freightdesk', freightdeskRoutes);
 app.use('/email', emailRoutes);
+app.use('/partner/swift-solutions', partnerSwiftSolutionsRoutes);
 
 // Alias used by DATGO-style clients
 app.get('/file/cookies/:sessionId?', require('./middleware/auth').authenticateToken, require('./controllers/cookieController').getActiveCookieForUser);
