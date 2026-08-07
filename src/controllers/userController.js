@@ -67,7 +67,7 @@ async function enrichUser(userDoc) {
 async function listUsers(req, res) {
   try {
     const page = Math.max(1, parseInt(req.query.page, 10) || 1);
-    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 50));
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit, 10) || 50));
     const search = (req.query.search || '').trim();
     const plan = String(req.query.plan || '').trim().toLowerCase();
     const label = String(req.query.label || '').trim();
@@ -192,7 +192,12 @@ async function createUser(req, res) {
       return res.status(409).json({ message: 'Email already exists' });
     }
 
-    const nextRole = role === 'admin' ? 'admin' : 'user';
+    const nextRole = 'user';
+    if (role === 'admin') {
+      return res.status(403).json({
+        message: 'Admin accounts can only be created directly in the database'
+      });
+    }
     let nextProxyId = null;
     if (proxyId) {
       const p = await Proxy.findById(proxyId);
@@ -256,7 +261,12 @@ async function updateUser(req, res) {
     if (name !== undefined) user.name = name;
     if (email !== undefined) user.email = email.toLowerCase();
     if (password) user.password = password;
-    if (role !== undefined) user.role = role === 'admin' ? 'admin' : 'user';
+    // Role is DB-only — never promote/demote via API or admin panel
+    if (role !== undefined && role === 'admin') {
+      return res.status(403).json({
+        message: 'Admin role can only be set directly in the database'
+      });
+    }
     if (isBanned !== undefined) user.isBanned = !!isBanned;
     if (domain !== undefined) user.domain = domain;
     if (note !== undefined) user.note = note;
