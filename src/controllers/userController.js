@@ -84,6 +84,8 @@ async function listUsers(req, res) {
       conditions.push({ label: 'swiftSolutions' });
     } else if (label === 'test') {
       conditions.push({ label: 'test' });
+    } else if (label === 'horizon') {
+      conditions.push({ label: 'horizon' });
     } else if (label === 'none') {
       conditions.push({
         $or: [{ label: '' }, { label: null }, { label: { $exists: false } }]
@@ -114,7 +116,7 @@ async function listUsers(req, res) {
     }
 
     if (proxy === 'assigned') {
-      conditions.push({ proxyId: { $ne: null } });
+      conditions.push({ proxyId: { $exists: true, $ne: null } });
     } else if (proxy === 'none') {
       conditions.push({
         $or: [{ proxyId: null }, { proxyId: { $exists: false } }]
@@ -122,7 +124,7 @@ async function listUsers(req, res) {
     }
 
     if (cookie === 'assigned') {
-      conditions.push({ assignedCookieId: { $ne: null } });
+      conditions.push({ assignedCookieId: { $exists: true, $ne: null } });
     } else if (cookie === 'none') {
       conditions.push({
         $or: [{ assignedCookieId: null }, { assignedCookieId: { $exists: false } }]
