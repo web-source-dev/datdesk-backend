@@ -82,7 +82,15 @@ async function listUsers(req, res) {
     conditions.push({ role: { $ne: 'admin' } });
 
     if (label === 'swiftSolutions') {
-      conditions.push({ label: 'swiftSolutions' });
+      // Match exact slug and common variants so partner Swift users always appear
+      conditions.push({
+        $or: [
+          { label: 'swiftSolutions' },
+          { label: /^swift\s*solutions$/i },
+          { label: 'swift_solutions' },
+          { label: 'swift-solutions' }
+        ]
+      });
     } else if (label === 'test') {
       conditions.push({ label: 'test' });
     } else if (label === 'horizon') {
