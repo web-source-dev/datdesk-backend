@@ -26,6 +26,26 @@ async function createAppPasswordTransport(account) {
   });
 }
 
+async function createSmtpTransport(account) {
+  const password = decryptSecret(account.appPasswordEnc);
+  if (!password) throw new Error('Email account is missing credentials');
+  const host = String(account.smtpHost || '').trim();
+  const port = Number(account.smtpPort) || 587;
+  if (!host) throw new Error('SMTP host is required');
+  return nodemailer.createTransport({
+    host,
+    port,
+    secure: Boolean(account.smtpSecure),
+    auth: {
+      user: account.email,
+      pass: password
+    },
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 20_000
+  });
+}
+
 async function refreshGoogleAccessToken(account) {
   const clientId = process.env.GOOGLE_CLIENT_ID;
   const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
@@ -89,6 +109,7 @@ async function createOAuthTransport(account) {
 
 async function getTransportForAccount(account) {
   if (account.method === 'oauth') return createOAuthTransport(account);
+  if (account.method === 'smtp') return createSmtpTransport(account);
   return createAppPasswordTransport(account);
 }
 

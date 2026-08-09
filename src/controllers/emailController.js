@@ -32,16 +32,45 @@ function verifyOAuthState(state) {
   return payload;
 }
 
+async function listAccounts(userId) {
+  return EmailAccount.find({ userId }).sort({ isDefault: -1, connectedAt: -1 });
+}
+
+async function ensureDefaultAccount(userId, preferredId) {
+  const accounts = await listAccounts(userId);
+  if (!accounts.length) return null;
+  if (preferredId) {
+    const match = accounts.find((a) => String(a._id) === String(preferredId));
+    if (match) {
+      if (!match.isDefault) {
+        await EmailAccount.updateMany({ userId }, { $set: { isDefault: false } });
+        match.isDefault = true;
+        await match.save();
+      }
+      return match;
+    }
+  }
+  const current = accounts.find((a) => a.isDefault) || accounts[0];
+  if (!current.isDefault) {
+    await EmailAccount.updateMany({ userId }, { $set: { isDefault: false } });
+    current.isDefault = true;
+    await current.save();
+  }
+  return current;
+}
+
 async function getStatus(req, res) {
   try {
-    const account = await EmailAccount.findOne({ userId: req.user.userId });
+    const accounts = await listAccounts(req.user.userId);
     const templates = await EmailTemplate.find({ userId: req.user.userId })
       .sort({ isDefault: -1, updatedAt: -1 })
       .lean();
+    const defaultAccount = accounts.find((a) => a.isDefault) || accounts[0] || null;
 
     return res.json({
-      connected: Boolean(account),
-      account: account ? account.toSafeJSON() : null,
+      connected: accounts.length > 0,
+      account: defaultAccount ? defaultAccount.toSafeJSON() : null,
+      accounts: accounts.map((a) => a.toSafeJSON()),
       oauthAvailable: isGoogleOAuthConfigured(),
       templates: templates.map((t) => ({
         id: String(t._id),
@@ -65,6 +94,7 @@ async function connectAppPassword(req, res) {
       .toLowerCase();
     const appPassword = String(req.body?.appPassword || '').replace(/\s+/g, '');
     const displayName = String(req.body?.displayName || '').trim();
+    const makeDefault = req.body?.isDefault !== false;
 
     if (!EMAIL_RE.test(email)) {
       return res.status(400).json({ message: 'Enter a valid email address' });
@@ -79,7 +109,8 @@ async function connectAppPassword(req, res) {
       method: 'app_password',
       appPasswordEnc: encryptSecret(appPassword),
       displayName,
-      connectedAt: new Date()
+      connectedAt: new Date(),
+      isDefault: false
     });
 
     try {
@@ -92,36 +123,159 @@ async function connectAppPassword(req, res) {
       });
     }
 
-    const existing = await EmailAccount.findOne({ userId: req.user.userId }).select(
-      '+appPasswordEnc +refreshTokenEnc +accessTokenEnc'
-    );
+    let account = await EmailAccount.findOne({
+      userId: req.user.userId,
+      email
+    }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
 
-    if (existing) {
-      existing.email = email;
-      existing.method = 'app_password';
-      existing.appPasswordEnc = encryptSecret(appPassword);
-      existing.refreshTokenEnc = '';
-      existing.accessTokenEnc = '';
-      existing.accessTokenExpiresAt = null;
-      existing.displayName = displayName;
-      existing.connectedAt = new Date();
-      await existing.save();
-      return res.json({ message: 'Email connected', account: existing.toSafeJSON() });
+    if (account) {
+      account.method = 'app_password';
+      account.appPasswordEnc = encryptSecret(appPassword);
+      account.refreshTokenEnc = '';
+      account.accessTokenEnc = '';
+      account.accessTokenExpiresAt = null;
+      account.displayName = displayName;
+      account.smtpHost = '';
+      account.smtpPort = 587;
+      account.smtpSecure = false;
+      account.connectedAt = new Date();
+      await account.save();
+    } else {
+      await draft.save();
+      account = draft;
     }
 
-    await draft.save();
-    return res.status(201).json({ message: 'Email connected', account: draft.toSafeJSON() });
+    if (makeDefault || !(await EmailAccount.exists({ userId: req.user.userId, isDefault: true }))) {
+      await ensureDefaultAccount(req.user.userId, account._id);
+      account = await EmailAccount.findById(account._id);
+    }
+
+    return res.status(account.wasNew ? 201 : 200).json({
+      message: 'Email connected',
+      account: account.toSafeJSON()
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to connect email' });
   }
 }
 
+async function connectSmtp(req, res) {
+  try {
+    const email = String(req.body?.email || '')
+      .trim()
+      .toLowerCase();
+    const password = String(req.body?.password || req.body?.appPassword || '').trim();
+    const displayName = String(req.body?.displayName || '').trim();
+    const smtpHost = String(req.body?.smtpHost || '').trim();
+    const smtpPort = Number(req.body?.smtpPort) || 587;
+    const smtpSecure = Boolean(req.body?.smtpSecure);
+    const makeDefault = req.body?.isDefault !== false;
+
+    if (!EMAIL_RE.test(email)) {
+      return res.status(400).json({ message: 'Enter a valid email address' });
+    }
+    if (!password || password.length < 3) {
+      return res.status(400).json({ message: 'SMTP password is required' });
+    }
+    if (!smtpHost) {
+      return res.status(400).json({ message: 'SMTP host is required' });
+    }
+
+    const draft = new EmailAccount({
+      userId: req.user.userId,
+      email,
+      method: 'smtp',
+      appPasswordEnc: encryptSecret(password),
+      displayName,
+      smtpHost,
+      smtpPort,
+      smtpSecure,
+      connectedAt: new Date(),
+      isDefault: false
+    });
+
+    try {
+      await verifyAccountCredentials(draft);
+    } catch (err) {
+      return res.status(400).json({
+        message: err.message || 'Could not verify SMTP credentials. Check host, port, and password.'
+      });
+    }
+
+    let account = await EmailAccount.findOne({
+      userId: req.user.userId,
+      email
+    }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+
+    if (account) {
+      account.method = 'smtp';
+      account.appPasswordEnc = encryptSecret(password);
+      account.refreshTokenEnc = '';
+      account.accessTokenEnc = '';
+      account.accessTokenExpiresAt = null;
+      account.displayName = displayName;
+      account.smtpHost = smtpHost;
+      account.smtpPort = smtpPort;
+      account.smtpSecure = smtpSecure;
+      account.connectedAt = new Date();
+      await account.save();
+    } else {
+      await draft.save();
+      account = draft;
+    }
+
+    if (makeDefault || !(await EmailAccount.exists({ userId: req.user.userId, isDefault: true }))) {
+      await ensureDefaultAccount(req.user.userId, account._id);
+      account = await EmailAccount.findById(account._id);
+    }
+
+    return res.status(201).json({ message: 'SMTP connected', account: account.toSafeJSON() });
+  } catch (error) {
+    return res.status(500).json({ message: error.message || 'Failed to connect SMTP' });
+  }
+}
+
 async function disconnect(req, res) {
   try {
-    await EmailAccount.deleteOne({ userId: req.user.userId });
-    return res.json({ message: 'Email disconnected', connected: false });
+    const accountId = req.body?.accountId || req.query?.accountId;
+    if (accountId) {
+      const result = await EmailAccount.deleteOne({
+        _id: accountId,
+        userId: req.user.userId
+      });
+      if (!result.deletedCount) {
+        return res.status(404).json({ message: 'Account not found' });
+      }
+      await ensureDefaultAccount(req.user.userId);
+      const accounts = await listAccounts(req.user.userId);
+      return res.json({
+        message: 'Email disconnected',
+        connected: accounts.length > 0,
+        accounts: accounts.map((a) => a.toSafeJSON())
+      });
+    }
+
+    await EmailAccount.deleteMany({ userId: req.user.userId });
+    return res.json({ message: 'Email disconnected', connected: false, accounts: [] });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to disconnect' });
+  }
+}
+
+async function setDefaultAccount(req, res) {
+  try {
+    const accountId = req.body?.accountId;
+    if (!accountId) return res.status(400).json({ message: 'accountId is required' });
+    const account = await ensureDefaultAccount(req.user.userId, accountId);
+    if (!account) return res.status(404).json({ message: 'Account not found' });
+    const accounts = await listAccounts(req.user.userId);
+    return res.json({
+      message: 'Default account updated',
+      account: account.toSafeJSON(),
+      accounts: accounts.map((a) => a.toSafeJSON())
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message || 'Failed to set default account' });
   }
 }
 
@@ -216,9 +370,25 @@ async function deleteTemplate(req, res) {
 
 async function sendEmail(req, res) {
   try {
-    const account = await EmailAccount.findOne({ userId: req.user.userId }).select(
-      '+appPasswordEnc +refreshTokenEnc +accessTokenEnc'
-    );
+    const accountId = req.body?.accountId;
+    let account = null;
+    if (accountId) {
+      account = await EmailAccount.findOne({
+        _id: accountId,
+        userId: req.user.userId
+      }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+    } else {
+      account = await EmailAccount.findOne({
+        userId: req.user.userId,
+        isDefault: true
+      }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+      if (!account) {
+        account = await EmailAccount.findOne({ userId: req.user.userId }).select(
+          '+appPasswordEnc +refreshTokenEnc +accessTokenEnc'
+        );
+      }
+    }
+
     if (!account) {
       return res.status(400).json({ message: 'Connect an email account first' });
     }
@@ -262,7 +432,7 @@ async function sendEmail(req, res) {
     }
 
     const result = await sendMail({ account, to, subject, body });
-    return res.json({ message: 'Email sent', ...result });
+    return res.json({ message: 'Email sent', from: account.email, ...result });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to send email' });
   }
@@ -273,7 +443,7 @@ async function getOAuthUrl(req, res) {
     if (!isGoogleOAuthConfigured()) {
       return res.status(400).json({
         message:
-          'Google OAuth is not configured. Use App Password, or set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET on the server.'
+          'Google OAuth is not configured. Use App Password or SMTP, or set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET on the server.'
       });
     }
     const state = signOAuthState(req.user.userId);
@@ -301,21 +471,25 @@ async function oauthCallback(req, res) {
     const { userId } = verifyOAuthState(state);
     const tokens = await exchangeGoogleCode(String(code));
     const profile = await fetchGoogleProfile(tokens.access_token);
+    const email = String(profile.email).toLowerCase();
 
     const payload = {
       userId,
-      email: String(profile.email).toLowerCase(),
+      email,
       method: 'oauth',
       displayName: profile.name || '',
       refreshTokenEnc: encryptSecret(tokens.refresh_token || ''),
       accessTokenEnc: encryptSecret(tokens.access_token),
       accessTokenExpiresAt: new Date(Date.now() + (Number(tokens.expires_in) || 3600) * 1000),
       appPasswordEnc: '',
+      smtpHost: '',
+      smtpPort: 587,
+      smtpSecure: false,
       connectedAt: new Date()
     };
 
     if (!tokens.refresh_token) {
-      const existing = await EmailAccount.findOne({ userId }).select('+refreshTokenEnc');
+      const existing = await EmailAccount.findOne({ userId, email }).select('+refreshTokenEnc');
       if (existing?.refreshTokenEnc) {
         payload.refreshTokenEnc = existing.refreshTokenEnc;
       } else {
@@ -323,16 +497,21 @@ async function oauthCallback(req, res) {
       }
     }
 
-    await EmailAccount.findOneAndUpdate({ userId }, payload, {
+    const account = await EmailAccount.findOneAndUpdate({ userId, email }, payload, {
       upsert: true,
       new: true,
       setDefaultsOnInsert: true
     });
 
+    const hasDefault = await EmailAccount.exists({ userId, isDefault: true });
+    if (!hasDefault) {
+      await ensureDefaultAccount(userId, account._id);
+    }
+
     return res.send(
       `<!doctype html><html><body style="font-family:system-ui;padding:40px;background:#f8fafc;color:#0f172a">
         <h2 style="margin:0 0 8px">Gmail connected</h2>
-        <p style="margin:0 0 16px">Signed in as <strong>${profile.email}</strong>. You can close this window and return to Dat Desk.</p>
+        <p style="margin:0 0 16px">Signed in as <strong>${profile.email}</strong>. You can close this window and return to DAT.</p>
         <script>setTimeout(()=>window.close(),1200)</script>
       </body></html>`
     );
@@ -344,7 +523,9 @@ async function oauthCallback(req, res) {
 module.exports = {
   getStatus,
   connectAppPassword,
+  connectSmtp,
   disconnect,
+  setDefaultAccount,
   listTemplates,
   createTemplate,
   updateTemplate,

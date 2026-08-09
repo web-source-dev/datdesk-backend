@@ -2,7 +2,9 @@ const express = require('express');
 const {
   getStatus,
   connectAppPassword,
+  connectSmtp,
   disconnect,
+  setDefaultAccount,
   listTemplates,
   createTemplate,
   updateTemplate,
@@ -19,7 +21,9 @@ router.get('/oauth/callback', oauthCallback);
 
 router.get('/status', authenticateToken, getStatus);
 router.post('/connect/app-password', authenticateToken, connectAppPassword);
+router.post('/connect/smtp', authenticateToken, connectSmtp);
 router.post('/disconnect', authenticateToken, disconnect);
+router.post('/accounts/default', authenticateToken, setDefaultAccount);
 router.get('/oauth/url', authenticateToken, getOAuthUrl);
 
 router.get('/templates', authenticateToken, listTemplates);
