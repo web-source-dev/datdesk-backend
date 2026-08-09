@@ -1,10 +1,19 @@
 const nodemailer = require('nodemailer');
+const dns = require('dns');
 const { decryptSecret, encryptSecret } = require('../utils/secretCrypto');
+
+// Windows / some VPS resolve IPv6 first and hang forever on SMTP.
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {
+  // Node < 17
+}
 
 const GMAIL_SMTP = {
   host: 'smtp.gmail.com',
   port: 465,
-  secure: true
+  secure: true,
+  family: 4
 };
 
 const SMTP_PRESETS = {
@@ -97,16 +106,20 @@ function buildSmtpTransportOptions(account, overrides = {}) {
     host: normalized.host,
     port: normalized.port,
     secure: normalized.secure,
+    // Force IPv4 — IPv6 SMTP hangs/timeouts are very common on Windows & cloud VMs
+    family: 4,
     auth: {
       user: String(overrides.user || account.email || '').trim(),
       pass: password
     },
-    connectionTimeout: 30_000,
-    greetingTimeout: 30_000,
-    socketTimeout: 45_000,
+    // Keep per-attempt short so fallbacks don't stack into minutes
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
     tls: {
       rejectUnauthorized: false,
-      minVersion: 'TLSv1.2'
+      minVersion: 'TLSv1.2',
+      servername: normalized.host
     },
     requireTLS: !normalized.secure && (normalized.port === 587 || normalized.port === 25),
     ignoreTLS: false
@@ -155,23 +168,30 @@ function formatSmtpError(err, tried = []) {
     ? ` Tried: ${tried.map((t) => `${t.host}:${t.port}${t.secure ? '/SSL' : '/STARTTLS'}`).join(', ')}.`
     : '';
 
-  if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
-    return (
-      'SMTP connection timed out. Use port 587 without SSL/TLS, or port 465 with SSL/TLS. ' +
-      'Also confirm this machine can reach the mail server (outbound 465/587 not blocked).' +
-      triedLabel
+  if (code === 'ETIMEDOUT' || code === 'ESOCKET' || /timeout/i.test(msg)) {
+    const error = new Error(
+      'SMTP connection timed out. Your API server cannot reach the mail host (cloud hosts often block outbound ports 465/587). ' +
+        'Fix: In the extension Account tab set API server to http://localhost:7020 and run the backend locally, then connect again. ' +
+        'Or ask your host to allow outbound SMTP. For Gmail on a cloud API, use Connect with Google (OAuth) instead of SMTP.' +
+        triedLabel
     );
+    error.code = 'SMTP_BLOCKED';
+    return error;
   }
   if (code === 'ECONNREFUSED') {
-    return `SMTP connection refused.${triedLabel} Wrong host/port, or the mail server is blocking this IP.`;
+    return new Error(
+      `SMTP connection refused.${triedLabel} Wrong host/port, or the mail server is blocking this IP.`
+    );
   }
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    return `SMTP host not found. Check the SMTP host name.${triedLabel}`;
+    return new Error(`SMTP host not found. Check the SMTP host name.${triedLabel}`);
   }
   if (/invalid login|authentication|credentials|535|534|535-5\.7/i.test(msg)) {
-    return `SMTP login failed: ${msg}. For Gmail/Yahoo use an App Password, not your normal password.`;
+    return new Error(
+      `SMTP login failed: ${msg}. For Gmail/Yahoo use an App Password, not your normal password.`
+    );
   }
-  return `${msg}${triedLabel}`;
+  return new Error(`${msg}${triedLabel}`);
 }
 
 async function createAppPasswordTransport(account) {
@@ -183,10 +203,10 @@ async function createAppPasswordTransport(account) {
       user: account.email,
       pass: password
     },
-    connectionTimeout: 30_000,
-    greetingTimeout: 30_000,
-    socketTimeout: 45_000,
-    tls: { rejectUnauthorized: false }
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
+    tls: { rejectUnauthorized: false, servername: 'smtp.gmail.com' }
   });
 }
 
@@ -301,10 +321,80 @@ async function verifySmtpWithFallbacks(account) {
     }
   }
 
-  throw new Error(formatSmtpError(lastErr, tried));
+  throw formatSmtpError(lastErr, tried);
+}
+
+async function verifyOauthAccount(account) {
+  // HTTPS only — works even when cloud hosts block SMTP ports
+  const accessToken = await getOAuthAccessToken(account);
+  await fetchGoogleProfile(accessToken);
+  return true;
+}
+
+function toBase64Url(str) {
+  return Buffer.from(str, 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '');
+}
+
+function buildRfc822Message({ from, to, subject, body, replyTo }) {
+  const isHtml = /<[a-z][\s\S]*>/i.test(body);
+  const lines = [
+    `From: ${from}`,
+    `To: ${to}`,
+    `Subject: ${subject.replace(/\r?\n/g, ' ')}`,
+    replyTo ? `Reply-To: ${replyTo}` : null,
+    'MIME-Version: 1.0',
+    isHtml
+      ? 'Content-Type: text/html; charset="UTF-8"'
+      : 'Content-Type: text/plain; charset="UTF-8"',
+    'Content-Transfer-Encoding: 7bit',
+    '',
+    body
+  ].filter((l) => l != null);
+  return lines.join('\r\n');
+}
+
+async function sendViaGmailApi(account, { to, subject, body, replyTo }) {
+  const accessToken = await getOAuthAccessToken(account);
+  const fromName = account.displayName || account.email;
+  const from = `"${String(fromName).replace(/"/g, '')}" <${account.email}>`;
+  const raw = toBase64Url(
+    buildRfc822Message({
+      from,
+      to,
+      subject,
+      body,
+      replyTo: replyTo || account.email
+    })
+  );
+
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ raw })
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Gmail API send failed (${res.status})`);
+  }
+  return {
+    messageId: data.id || data.messageId || null,
+    accepted: [to],
+    rejected: [],
+    via: 'gmail_api'
+  };
 }
 
 async function verifyAccountCredentials(account) {
+  if (account.method === 'oauth') {
+    return verifyOauthAccount(account);
+  }
   if (account.method === 'smtp') {
     const working = await verifySmtpWithFallbacks(account);
     account.smtpHost = working.host;
@@ -312,11 +402,12 @@ async function verifyAccountCredentials(account) {
     account.smtpSecure = working.secure;
     return working;
   }
+  // Gmail app password — also SMTP (needs outbound 465/587 from the API host)
   const transport = await getTransportForAccount(account);
   try {
     await transport.verify();
   } catch (err) {
-    throw new Error(formatSmtpError(err));
+    throw formatSmtpError(err);
   } finally {
     try {
       transport.close();
@@ -328,6 +419,11 @@ async function verifyAccountCredentials(account) {
 }
 
 async function sendMail({ account, to, subject, body, replyTo }) {
+  // OAuth → Gmail REST over HTTPS (not blocked on cloud VMs)
+  if (account.method === 'oauth') {
+    return sendViaGmailApi(account, { to, subject, body, replyTo });
+  }
+
   const transport = await getTransportForAccount(account);
   try {
     const fromName = account.displayName || account.email;
@@ -342,8 +438,11 @@ async function sendMail({ account, to, subject, body, replyTo }) {
     return {
       messageId: info.messageId,
       accepted: info.accepted || [],
-      rejected: info.rejected || []
+      rejected: info.rejected || [],
+      via: 'smtp'
     };
+  } catch (err) {
+    throw formatSmtpError(err);
   } finally {
     try {
       transport.close();

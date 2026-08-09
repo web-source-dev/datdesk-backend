@@ -120,7 +120,8 @@ async function connectAppPassword(req, res) {
       return res.status(400).json({
         message:
           err.message ||
-          'Could not connect. Use a Gmail App Password (Google Account → Security → App passwords).'
+          'Could not connect. Use a Gmail App Password (Google Account → Security → App passwords).',
+        code: err.code || 'SMTP_VERIFY_FAILED'
       });
     }
 
@@ -207,7 +208,8 @@ async function connectSmtp(req, res) {
       working = await verifyAccountCredentials(draft);
     } catch (err) {
       return res.status(400).json({
-        message: err.message || 'Could not verify SMTP credentials. Check host, port, and password.'
+        message: err.message || 'Could not verify SMTP credentials. Check host, port, and password.',
+        code: err.code || 'SMTP_VERIFY_FAILED'
       });
     }
 
