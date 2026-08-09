@@ -32,7 +32,8 @@ const SMTP_PRESETS = {
 };
 
 function applyTemplate(text, vars = {}) {
-  return String(text || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key) => {
+  return String(text || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (full, key) => {
+    if (!Object.prototype.hasOwnProperty.call(vars, key)) return full;
     const v = vars[key];
     return v == null ? '' : String(v);
   });
