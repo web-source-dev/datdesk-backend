@@ -9,7 +9,8 @@ const {
   isGoogleOAuthConfigured,
   buildGoogleAuthUrl,
   exchangeGoogleCode,
-  fetchGoogleProfile
+  fetchGoogleProfile,
+  normalizeSmtpSettings
 } = require('../services/mailService');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -166,10 +167,14 @@ async function connectSmtp(req, res) {
       .toLowerCase();
     const password = String(req.body?.password || req.body?.appPassword || '').trim();
     const displayName = String(req.body?.displayName || '').trim();
-    const smtpHost = String(req.body?.smtpHost || '').trim();
-    const smtpPort = Number(req.body?.smtpPort) || 587;
-    const smtpSecure = Boolean(req.body?.smtpSecure);
     const makeDefault = req.body?.isDefault !== false;
+
+    const normalized = normalizeSmtpSettings({
+      email,
+      smtpHost: req.body?.smtpHost,
+      smtpPort: req.body?.smtpPort,
+      smtpSecure: req.body?.smtpSecure
+    });
 
     if (!EMAIL_RE.test(email)) {
       return res.status(400).json({ message: 'Enter a valid email address' });
@@ -177,8 +182,11 @@ async function connectSmtp(req, res) {
     if (!password || password.length < 3) {
       return res.status(400).json({ message: 'SMTP password is required' });
     }
-    if (!smtpHost) {
-      return res.status(400).json({ message: 'SMTP host is required' });
+    if (!normalized.host) {
+      return res.status(400).json({
+        message:
+          'SMTP host is required (e.g. smtp.gmail.com, smtp.office365.com). Leave blank only for known providers like Gmail/Outlook/Yahoo.'
+      });
     }
 
     const draft = new EmailAccount({
@@ -187,20 +195,25 @@ async function connectSmtp(req, res) {
       method: 'smtp',
       appPasswordEnc: encryptSecret(password),
       displayName,
-      smtpHost,
-      smtpPort,
-      smtpSecure,
+      smtpHost: normalized.host,
+      smtpPort: normalized.port,
+      smtpSecure: normalized.secure,
       connectedAt: new Date(),
       isDefault: false
     });
 
+    let working;
     try {
-      await verifyAccountCredentials(draft);
+      working = await verifyAccountCredentials(draft);
     } catch (err) {
       return res.status(400).json({
         message: err.message || 'Could not verify SMTP credentials. Check host, port, and password.'
       });
     }
+
+    const finalHost = working?.host || normalized.host;
+    const finalPort = working?.port || normalized.port;
+    const finalSecure = working?.secure != null ? working.secure : normalized.secure;
 
     let account = await EmailAccount.findOne({
       userId: req.user.userId,
@@ -214,12 +227,15 @@ async function connectSmtp(req, res) {
       account.accessTokenEnc = '';
       account.accessTokenExpiresAt = null;
       account.displayName = displayName;
-      account.smtpHost = smtpHost;
-      account.smtpPort = smtpPort;
-      account.smtpSecure = smtpSecure;
+      account.smtpHost = finalHost;
+      account.smtpPort = finalPort;
+      account.smtpSecure = finalSecure;
       account.connectedAt = new Date();
       await account.save();
     } else {
+      draft.smtpHost = finalHost;
+      draft.smtpPort = finalPort;
+      draft.smtpSecure = finalSecure;
       await draft.save();
       account = draft;
     }

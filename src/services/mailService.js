@@ -7,11 +7,171 @@ const GMAIL_SMTP = {
   secure: true
 };
 
+const SMTP_PRESETS = {
+  'gmail.com': { host: 'smtp.gmail.com', port: 465, secure: true },
+  'googlemail.com': { host: 'smtp.gmail.com', port: 465, secure: true },
+  'outlook.com': { host: 'smtp.office365.com', port: 587, secure: false },
+  'hotmail.com': { host: 'smtp.office365.com', port: 587, secure: false },
+  'live.com': { host: 'smtp.office365.com', port: 587, secure: false },
+  'msn.com': { host: 'smtp.office365.com', port: 587, secure: false },
+  'office365.com': { host: 'smtp.office365.com', port: 587, secure: false },
+  'yahoo.com': { host: 'smtp.mail.yahoo.com', port: 465, secure: true },
+  'ymail.com': { host: 'smtp.mail.yahoo.com', port: 465, secure: true },
+  'icloud.com': { host: 'smtp.mail.me.com', port: 587, secure: false },
+  'me.com': { host: 'smtp.mail.me.com', port: 587, secure: false },
+  'mac.com': { host: 'smtp.mail.me.com', port: 587, secure: false }
+};
+
 function applyTemplate(text, vars = {}) {
   return String(text || '').replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_m, key) => {
     const v = vars[key];
     return v == null ? '' : String(v);
   });
+}
+
+function inferSmtpPreset(email) {
+  const domain = String(email || '')
+    .split('@')[1]
+    ?.toLowerCase()
+    .trim();
+  if (!domain) return null;
+  return SMTP_PRESETS[domain] || null;
+}
+
+/**
+ * Normalize host/port/secure so STARTTLS (587) and SSL (465) are not mixed up.
+ * Wrong secure+port combos are the #1 cause of SMTP "connection timeout".
+ */
+function normalizeSmtpSettings({ email, smtpHost, smtpPort, smtpSecure }) {
+  let host = String(smtpHost || '').trim();
+  let port = Number(smtpPort) || 0;
+  let secure = smtpSecure == null ? null : Boolean(smtpSecure);
+
+  const preset = inferSmtpPreset(email);
+  if (!host && preset) {
+    host = preset.host;
+    if (!port) port = preset.port;
+    if (secure == null) secure = preset.secure;
+  }
+
+  const hostLower = host.toLowerCase();
+  if (hostLower === 'smtp.gmail.com' || hostLower === 'smtp.mail.yahoo.com') {
+    if (!port || port === 587 || port === 465) {
+      if (secure === true || port === 465 || !port) {
+        port = port || 465;
+        secure = true;
+      } else {
+        port = 587;
+        secure = false;
+      }
+    }
+  }
+  if (hostLower === 'smtp.office365.com' || hostLower === 'smtp-mail.outlook.com') {
+    port = port || 587;
+    secure = false;
+  }
+
+  if (!port) port = secure ? 465 : 587;
+
+  if (port === 465) secure = true;
+  else if (port === 587 || port === 25 || port === 2525) secure = false;
+  else if (secure == null) secure = port === 465;
+
+  return { host, port: Number(port), secure: Boolean(secure) };
+}
+
+function buildSmtpTransportOptions(account, overrides = {}) {
+  const password = decryptSecret(account.appPasswordEnc);
+  if (!password) throw new Error('Email account is missing credentials');
+
+  const normalized = normalizeSmtpSettings({
+    email: overrides.email || account.email,
+    smtpHost: overrides.host != null ? overrides.host : account.smtpHost,
+    smtpPort: overrides.port != null ? overrides.port : account.smtpPort,
+    smtpSecure: overrides.secure != null ? overrides.secure : account.smtpSecure
+  });
+
+  if (!normalized.host) throw new Error('SMTP host is required');
+
+  const opts = {
+    host: normalized.host,
+    port: normalized.port,
+    secure: normalized.secure,
+    auth: {
+      user: String(overrides.user || account.email || '').trim(),
+      pass: password
+    },
+    connectionTimeout: 30_000,
+    greetingTimeout: 30_000,
+    socketTimeout: 45_000,
+    tls: {
+      rejectUnauthorized: false,
+      minVersion: 'TLSv1.2'
+    },
+    requireTLS: !normalized.secure && (normalized.port === 587 || normalized.port === 25),
+    ignoreTLS: false
+  };
+
+  return { opts, normalized };
+}
+
+function smtpCandidateConfigs(account) {
+  const base = normalizeSmtpSettings({
+    email: account.email,
+    smtpHost: account.smtpHost,
+    smtpPort: account.smtpPort,
+    smtpSecure: account.smtpSecure
+  });
+
+  const candidates = [];
+  const push = (host, port, secure) => {
+    if (!host) return;
+    const key = `${host}|${port}|${secure}`;
+    if (candidates.some((c) => `${c.host}|${c.port}|${c.secure}` === key)) return;
+    candidates.push({ host, port, secure });
+  };
+
+  if (base.host) push(base.host, base.port, base.secure);
+  if (base.host) {
+    push(base.host, 587, false);
+    push(base.host, 465, true);
+    push(base.host, 2525, false);
+  }
+
+  const preset = inferSmtpPreset(account.email);
+  if (preset) {
+    push(preset.host, preset.port, preset.secure);
+    push(preset.host, 587, false);
+    push(preset.host, 465, true);
+  }
+
+  return candidates;
+}
+
+function formatSmtpError(err, tried = []) {
+  const code = err?.code || '';
+  const msg = String(err?.message || err || 'SMTP connection failed');
+  const triedLabel = tried.length
+    ? ` Tried: ${tried.map((t) => `${t.host}:${t.port}${t.secure ? '/SSL' : '/STARTTLS'}`).join(', ')}.`
+    : '';
+
+  if (code === 'ETIMEDOUT' || /timeout/i.test(msg)) {
+    return (
+      'SMTP connection timed out. Use port 587 without SSL/TLS, or port 465 with SSL/TLS. ' +
+      'Also confirm this machine can reach the mail server (outbound 465/587 not blocked).' +
+      triedLabel
+    );
+  }
+  if (code === 'ECONNREFUSED') {
+    return `SMTP connection refused.${triedLabel} Wrong host/port, or the mail server is blocking this IP.`;
+  }
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
+    return `SMTP host not found. Check the SMTP host name.${triedLabel}`;
+  }
+  if (/invalid login|authentication|credentials|535|534|535-5\.7/i.test(msg)) {
+    return `SMTP login failed: ${msg}. For Gmail/Yahoo use an App Password, not your normal password.`;
+  }
+  return `${msg}${triedLabel}`;
 }
 
 async function createAppPasswordTransport(account) {
@@ -22,28 +182,17 @@ async function createAppPasswordTransport(account) {
     auth: {
       user: account.email,
       pass: password
-    }
+    },
+    connectionTimeout: 30_000,
+    greetingTimeout: 30_000,
+    socketTimeout: 45_000,
+    tls: { rejectUnauthorized: false }
   });
 }
 
 async function createSmtpTransport(account) {
-  const password = decryptSecret(account.appPasswordEnc);
-  if (!password) throw new Error('Email account is missing credentials');
-  const host = String(account.smtpHost || '').trim();
-  const port = Number(account.smtpPort) || 587;
-  if (!host) throw new Error('SMTP host is required');
-  return nodemailer.createTransport({
-    host,
-    port,
-    secure: Boolean(account.smtpSecure),
-    auth: {
-      user: account.email,
-      pass: password
-    },
-    connectionTimeout: 15_000,
-    greetingTimeout: 15_000,
-    socketTimeout: 20_000
-  });
+  const { opts } = buildSmtpTransportOptions(account);
+  return nodemailer.createTransport(opts);
 }
 
 async function refreshGoogleAccessToken(account) {
@@ -103,7 +252,10 @@ async function createOAuthTransport(account) {
       clientSecret,
       refreshToken,
       accessToken
-    }
+    },
+    connectionTimeout: 30_000,
+    greetingTimeout: 30_000,
+    socketTimeout: 45_000
   });
 }
 
@@ -113,28 +265,92 @@ async function getTransportForAccount(account) {
   return createAppPasswordTransport(account);
 }
 
+/**
+ * Verify SMTP by trying several common TLS/port combinations.
+ * Returns the working { host, port, secure } so callers can persist corrections.
+ */
+async function verifySmtpWithFallbacks(account) {
+  const candidates = smtpCandidateConfigs(account);
+  const tried = [];
+  let lastErr = null;
+
+  for (const candidate of candidates) {
+    tried.push(candidate);
+    let transport;
+    try {
+      const { opts, normalized } = buildSmtpTransportOptions(account, candidate);
+      transport = nodemailer.createTransport(opts);
+      await transport.verify();
+      try {
+        transport.close();
+      } catch {
+        // ignore
+      }
+      return normalized;
+    } catch (err) {
+      lastErr = err;
+      try {
+        transport?.close();
+      } catch {
+        // ignore
+      }
+      const msg = String(err?.message || '');
+      if (/invalid login|authentication failed|535/i.test(msg) && tried.length >= 2) {
+        break;
+      }
+    }
+  }
+
+  throw new Error(formatSmtpError(lastErr, tried));
+}
+
 async function verifyAccountCredentials(account) {
+  if (account.method === 'smtp') {
+    const working = await verifySmtpWithFallbacks(account);
+    account.smtpHost = working.host;
+    account.smtpPort = working.port;
+    account.smtpSecure = working.secure;
+    return working;
+  }
   const transport = await getTransportForAccount(account);
-  await transport.verify();
+  try {
+    await transport.verify();
+  } catch (err) {
+    throw new Error(formatSmtpError(err));
+  } finally {
+    try {
+      transport.close();
+    } catch {
+      // ignore
+    }
+  }
   return true;
 }
 
 async function sendMail({ account, to, subject, body, replyTo }) {
   const transport = await getTransportForAccount(account);
-  const fromName = account.displayName || account.email;
-  const info = await transport.sendMail({
-    from: `"${fromName.replace(/"/g, '')}" <${account.email}>`,
-    to,
-    subject,
-    text: body,
-    html: body.includes('<') ? body : undefined,
-    replyTo: replyTo || account.email
-  });
-  return {
-    messageId: info.messageId,
-    accepted: info.accepted || [],
-    rejected: info.rejected || []
-  };
+  try {
+    const fromName = account.displayName || account.email;
+    const info = await transport.sendMail({
+      from: `"${fromName.replace(/"/g, '')}" <${account.email}>`,
+      to,
+      subject,
+      text: body,
+      html: body.includes('<') ? body : undefined,
+      replyTo: replyTo || account.email
+    });
+    return {
+      messageId: info.messageId,
+      accepted: info.accepted || [],
+      rejected: info.rejected || []
+    };
+  } finally {
+    try {
+      transport.close();
+    } catch {
+      // ignore
+    }
+  }
 }
 
 function isGoogleOAuthConfigured() {
@@ -200,5 +416,8 @@ module.exports = {
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   fetchGoogleProfile,
-  getOAuthRedirectUri
+  getOAuthRedirectUri,
+  normalizeSmtpSettings,
+  inferSmtpPreset,
+  SMTP_PRESETS
 };
