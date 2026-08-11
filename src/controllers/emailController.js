@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const EmailAccount = require('../models/EmailAccount');
 const EmailTemplate = require('../models/EmailTemplate');
+const EmailSent = require('../models/EmailSent');
 const { encryptSecret } = require('../utils/secretCrypto');
 const {
   applyTemplate,
@@ -450,9 +451,50 @@ async function sendEmail(req, res) {
     }
 
     const result = await sendMail({ account, to, subject, body });
+
+    try {
+      await EmailSent.create({
+        userId: req.user.userId,
+        accountId: account._id,
+        templateId: templateId || null,
+        from: account.email,
+        to,
+        subject,
+        body,
+        method: account.method || 'unknown',
+        messageId: result?.messageId || result?.id || '',
+        vars
+      });
+    } catch (logErr) {
+      console.warn('[email] failed to log sent email:', logErr?.message || logErr);
+    }
+
     return res.json({ message: 'Email sent', from: account.email, ...result });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to send email' });
+  }
+}
+
+function getOAuthWebRedirectBase() {
+  return String(
+    process.env.OAUTH_WEB_REDIRECT_URL ||
+      process.env.WEB_REDIRECT_URL ||
+      'http://localhost:5174'
+  ).replace(/\/$/, '');
+}
+
+function redirectOAuthResult(res, params) {
+  try {
+    const url = new URL(`${getOAuthWebRedirectBase()}/`);
+    Object.entries(params || {}).forEach(([key, value]) => {
+      if (value == null || value === '') return;
+      url.searchParams.set(key, String(value));
+    });
+    return res.redirect(302, url.toString());
+  } catch (err) {
+    return res
+      .status(500)
+      .send(`OAuth finished but redirect failed: ${err.message || 'unknown error'}`);
   }
 }
 
@@ -465,7 +507,10 @@ async function getOAuthUrl(req, res) {
       });
     }
     const state = signOAuthState(req.user.userId);
-    return res.json({ url: buildGoogleAuthUrl(state) });
+    return res.json({
+      url: buildGoogleAuthUrl(state),
+      redirectPage: getOAuthWebRedirectBase()
+    });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to start Google connect' });
   }
@@ -473,13 +518,10 @@ async function getOAuthUrl(req, res) {
 
 async function oauthCallback(req, res) {
   const fail = (msg) =>
-    res
-      .status(400)
-      .send(
-        `<!doctype html><html><body style="font-family:system-ui;padding:40px"><h2>Gmail connect failed</h2><p>${String(
-          msg || 'Unknown error'
-        )}</p><p>You can close this window.</p></body></html>`
-      );
+    redirectOAuthResult(res, {
+      status: 'error',
+      message: String(msg || 'OAuth failed').slice(0, 300)
+    });
 
   try {
     const { code, state, error, error_description: errorDescription } = req.query || {};
@@ -526,13 +568,10 @@ async function oauthCallback(req, res) {
       await ensureDefaultAccount(userId, account._id);
     }
 
-    return res.send(
-      `<!doctype html><html><body style="font-family:system-ui;padding:40px;background:#f8fafc;color:#0f172a">
-        <h2 style="margin:0 0 8px">Gmail connected</h2>
-        <p style="margin:0 0 16px">Signed in as <strong>${profile.email}</strong>. You can close this window and return to DAT.</p>
-        <script>setTimeout(()=>window.close(),1200)</script>
-      </body></html>`
-    );
+    return redirectOAuthResult(res, {
+      status: 'ok',
+      email: profile.email
+    });
   } catch (error) {
     return fail(error.message || 'OAuth failed');
   }
