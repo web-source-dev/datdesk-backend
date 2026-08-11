@@ -217,8 +217,8 @@ async function createSmtpTransport(account) {
 }
 
 async function refreshGoogleAccessToken(account) {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const clientId = readEnv('GOOGLE_CLIENT_ID');
+  const clientSecret = readEnv('GOOGLE_CLIENT_SECRET');
   if (!clientId || !clientSecret) {
     throw new Error('Google OAuth is not configured on the server');
   }
@@ -259,8 +259,8 @@ async function getOAuthAccessToken(account) {
 }
 
 async function createOAuthTransport(account) {
-  const clientId = process.env.GOOGLE_CLIENT_ID;
-  const clientSecret = process.env.GOOGLE_CLIENT_SECRET;
+  const clientId = readEnv('GOOGLE_CLIENT_ID');
+  const clientSecret = readEnv('GOOGLE_CLIENT_SECRET');
   const accessToken = await getOAuthAccessToken(account);
   const refreshToken = decryptSecret(account.refreshTokenEnc);
 
@@ -453,20 +453,41 @@ async function sendMail({ account, to, subject, body, replyTo }) {
   }
 }
 
+function readEnv(name) {
+  const raw = process.env[name];
+  if (raw == null) return '';
+  let value = String(raw).trim();
+  // Strip wrapping quotes that sometimes get pasted into .env / panel UI
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+  return value;
+}
+
+function googleOAuthMissingKeys() {
+  const missing = [];
+  if (!readEnv('GOOGLE_CLIENT_ID')) missing.push('GOOGLE_CLIENT_ID');
+  if (!readEnv('GOOGLE_CLIENT_SECRET')) missing.push('GOOGLE_CLIENT_SECRET');
+  return missing;
+}
+
 function isGoogleOAuthConfigured() {
-  return Boolean(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET);
+  return googleOAuthMissingKeys().length === 0;
 }
 
 function getOAuthRedirectUri() {
   return (
-    process.env.GOOGLE_OAUTH_REDIRECT_URI ||
-    `${(process.env.PUBLIC_API_URL || 'http://localhost:7020').replace(/\/$/, '')}/email/oauth/callback`
+    readEnv('GOOGLE_OAUTH_REDIRECT_URI') ||
+    `${(readEnv('PUBLIC_API_URL') || 'http://localhost:7020').replace(/\/$/, '')}/email/oauth/callback`
   );
 }
 
 function buildGoogleAuthUrl(state) {
   const params = new URLSearchParams({
-    client_id: process.env.GOOGLE_CLIENT_ID,
+    client_id: readEnv('GOOGLE_CLIENT_ID'),
     redirect_uri: getOAuthRedirectUri(),
     response_type: 'code',
     scope: ['https://mail.google.com/', 'email', 'profile'].join(' '),
@@ -480,8 +501,8 @@ function buildGoogleAuthUrl(state) {
 async function exchangeGoogleCode(code) {
   const body = new URLSearchParams({
     code,
-    client_id: process.env.GOOGLE_CLIENT_ID,
-    client_secret: process.env.GOOGLE_CLIENT_SECRET,
+    client_id: readEnv('GOOGLE_CLIENT_ID'),
+    client_secret: readEnv('GOOGLE_CLIENT_SECRET'),
     redirect_uri: getOAuthRedirectUri(),
     grant_type: 'authorization_code'
   });
@@ -513,6 +534,7 @@ module.exports = {
   verifyAccountCredentials,
   sendMail,
   isGoogleOAuthConfigured,
+  googleOAuthMissingKeys,
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   fetchGoogleProfile,

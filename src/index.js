@@ -1,10 +1,12 @@
-require('dotenv').config();
+const path = require('path');
+const fs = require('fs');
+
+// Always load backend/.env (not process.cwd()) so pm2 / systemd / other CWDs still work.
+require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const express = require('express');
 const cors = require('cors');
 const mongoose = require('mongoose');
-const path = require('path');
-const fs = require('fs');
 
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
@@ -17,6 +19,11 @@ const emailRoutes = require('./routes/email');
 const partnerSwiftSolutionsRoutes = require('./routes/partnerSwiftSolutions');
 const { ensureCookiesDir } = require('./utils/cookies');
 const { ensureExtensionsDir } = require('./controllers/extensionController');
+const {
+  isGoogleOAuthConfigured,
+  getOAuthRedirectUri,
+  googleOAuthMissingKeys
+} = require('./services/mailService');
 
 const app = express();
 const PORT = process.env.PORT || 7020;
@@ -31,7 +38,15 @@ app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'datdesk-backend', port: Number(process.env.PORT) || 7020 });
+  const oauthConfigured = isGoogleOAuthConfigured();
+  res.json({
+    ok: true,
+    service: 'datdesk-backend',
+    port: Number(process.env.PORT) || 7020,
+    oauthConfigured,
+    oauthMissing: oauthConfigured ? [] : googleOAuthMissingKeys(),
+    oauthRedirectUri: getOAuthRedirectUri()
+  });
 });
 
 app.use('/auth', authRoutes);
@@ -55,7 +70,16 @@ app.use((err, _req, res, _next) => {
 async function start() {
   const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/newdatapp';
   await mongoose.connect(uri);
-  console.log('[DB] Connected:', uri);
+  console.log('[DB] Connected:', uri.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@'));
+
+  if (isGoogleOAuthConfigured()) {
+    console.log('[EMAIL] Google OAuth: configured →', getOAuthRedirectUri());
+  } else {
+    console.warn(
+      '[EMAIL] Google OAuth: NOT configured. Missing:',
+      googleOAuthMissingKeys().join(', ') || '(unknown)'
+    );
+  }
 
   app.listen(PORT, () => {
     console.log(`[SERVER] Dat Desk backend listening on http://localhost:${PORT}`);

@@ -8,9 +8,11 @@ const {
   verifyAccountCredentials,
   sendMail,
   isGoogleOAuthConfigured,
+  googleOAuthMissingKeys,
   buildGoogleAuthUrl,
   exchangeGoogleCode,
   fetchGoogleProfile,
+  getOAuthRedirectUri,
   normalizeSmtpSettings
 } = require('../services/mailService');
 
@@ -501,15 +503,21 @@ function redirectOAuthResult(res, params) {
 async function getOAuthUrl(req, res) {
   try {
     if (!isGoogleOAuthConfigured()) {
+      const missing = googleOAuthMissingKeys();
       return res.status(400).json({
         message:
-          'Google OAuth is not configured. Use App Password or SMTP, or set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET on the server.'
+          'Google OAuth is not configured on this API server' +
+          (missing.length ? ` (missing ${missing.join(', ')})` : '') +
+          '. Set GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET in backend/.env and restart, or use App Password / SMTP.',
+        code: 'OAUTH_NOT_CONFIGURED',
+        missing
       });
     }
     const state = signOAuthState(req.user.userId);
     return res.json({
       url: buildGoogleAuthUrl(state),
-      redirectPage: getOAuthWebRedirectBase()
+      redirectPage: getOAuthWebRedirectBase(),
+      redirectUri: getOAuthRedirectUri()
     });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to start Google connect' });
