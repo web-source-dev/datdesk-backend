@@ -60,10 +60,13 @@ const emailSentSchema = new mongoose.Schema(
 );
 
 emailSentSchema.index({ userId: 1, createdAt: -1 });
+emailSentSchema.index({ accountId: 1, createdAt: -1 });
+emailSentSchema.index({ from: 1, createdAt: -1 });
 
 emailSentSchema.methods.toSafeJSON = function toSafeJSON() {
   return {
     id: String(this._id),
+    userId: this.userId ? String(this.userId) : null,
     from: this.from,
     to: this.to,
     subject: this.subject,
@@ -72,6 +75,7 @@ emailSentSchema.methods.toSafeJSON = function toSafeJSON() {
     messageId: this.messageId || '',
     templateId: this.templateId ? String(this.templateId) : null,
     accountId: this.accountId ? String(this.accountId) : null,
+    vars: this.vars || null,
     createdAt: this.createdAt
   };
 };

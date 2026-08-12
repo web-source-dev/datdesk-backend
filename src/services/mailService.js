@@ -529,6 +529,155 @@ async function fetchGoogleProfile(accessToken) {
   return data;
 }
 
+function headerValue(headers, name) {
+  const want = String(name || '').toLowerCase();
+  const match = (headers || []).find((h) => String(h?.name || '').toLowerCase() === want);
+  return match?.value ? String(match.value) : '';
+}
+
+function decodeBase64Url(data) {
+  if (!data) return '';
+  const normalized = String(data).replace(/-/g, '+').replace(/_/g, '/');
+  try {
+    return Buffer.from(normalized, 'base64').toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+function extractBodiesFromPayload(payload, out = { text: '', html: '' }) {
+  if (!payload) return out;
+  const mime = String(payload.mimeType || '').toLowerCase();
+  const data = payload.body?.data ? decodeBase64Url(payload.body.data) : '';
+  if (data) {
+    if (mime === 'text/plain' && !out.text) out.text = data;
+    if (mime === 'text/html' && !out.html) out.html = data;
+  }
+  for (const part of payload.parts || []) {
+    extractBodiesFromPayload(part, out);
+  }
+  return out;
+}
+
+function parseEmailAddressList(raw) {
+  return String(raw || '')
+    .split(',')
+    .map((p) => {
+      const m = p.match(/<([^>]+)>/);
+      return (m ? m[1] : p).trim().toLowerCase();
+    })
+    .filter(Boolean)
+    .join(', ');
+}
+
+/**
+ * List Gmail message IDs (paginated). labelIds e.g. ['INBOX'] or ['SENT'] or omit for all.
+ */
+async function listGmailMessageIds(account, { maxResults = 100, pageToken = '', labelIds = null, q = '' } = {}) {
+  const accessToken = await getOAuthAccessToken(account);
+  const params = new URLSearchParams({
+    maxResults: String(Math.min(Math.max(Number(maxResults) || 100, 1), 500))
+  });
+  if (pageToken) params.set('pageToken', pageToken);
+  if (q) params.set('q', q);
+  if (Array.isArray(labelIds) && labelIds.length) {
+    for (const id of labelIds) params.append('labelIds', id);
+  }
+
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages?${params}`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Gmail list failed (${res.status})`);
+  }
+  return {
+    messages: Array.isArray(data.messages) ? data.messages : [],
+    nextPageToken: data.nextPageToken || '',
+    resultSizeEstimate: data.resultSizeEstimate || 0
+  };
+}
+
+/**
+ * Fetch a single Gmail message and normalize fields for MailboxMessage.
+ */
+async function getGmailMessage(account, messageId, accountEmail = '') {
+  const accessToken = await getOAuthAccessToken(account);
+  const res = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=full`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Gmail get failed (${res.status})`);
+  }
+
+  const headers = data.payload?.headers || [];
+  const fromRaw = headerValue(headers, 'From');
+  const toRaw = headerValue(headers, 'To');
+  const ccRaw = headerValue(headers, 'Cc');
+  const subject = headerValue(headers, 'Subject');
+  const bodies = extractBodiesFromPayload(data.payload);
+  const labelIds = Array.isArray(data.labelIds) ? data.labelIds : [];
+  const own = String(accountEmail || account.email || '').toLowerCase();
+  const from = parseEmailAddressList(fromRaw);
+  let direction = 'unknown';
+  if (labelIds.includes('SENT') || (own && from.includes(own))) direction = 'outbound';
+  else if (labelIds.includes('INBOX') || labelIds.includes('CATEGORY_PERSONAL')) direction = 'inbound';
+
+  return {
+    providerMessageId: String(data.id),
+    threadId: String(data.threadId || ''),
+    labelIds,
+    direction,
+    from,
+    to: parseEmailAddressList(toRaw),
+    cc: parseEmailAddressList(ccRaw),
+    subject: subject.slice(0, 1000),
+    snippet: String(data.snippet || '').slice(0, 2000),
+    body: String(bodies.text || '').slice(0, 200000),
+    bodyHtml: String(bodies.html || '').slice(0, 200000),
+    internalDate: data.internalDate ? new Date(Number(data.internalDate)) : null
+  };
+}
+
+/**
+ * Pull Gmail messages in batches (lifetime sync helper).
+ * Returns normalized message objects; caller persists them.
+ */
+async function fetchGmailMessagesBatch(account, { maxMessages = 200, pageToken = '', q = '' } = {}) {
+  if (account.method !== 'oauth') {
+    const err = new Error(
+      'Lifetime mailbox sync requires a Google OAuth connected account. Reconnect this inbox with “Connect with Google”.'
+    );
+    err.code = 'OAUTH_REQUIRED';
+    throw err;
+  }
+
+  const list = await listGmailMessageIds(account, {
+    maxResults: Math.min(Number(maxMessages) || 200, 500),
+    pageToken,
+    q
+  });
+
+  const messages = [];
+  for (const item of list.messages) {
+    try {
+      const full = await getGmailMessage(account, item.id, account.email);
+      messages.push(full);
+    } catch (err) {
+      console.warn('[gmail] skip message', item.id, err?.message || err);
+    }
+  }
+
+  return {
+    messages,
+    nextPageToken: list.nextPageToken || '',
+    resultSizeEstimate: list.resultSizeEstimate || 0,
+    fetched: messages.length
+  };
+}
+
 module.exports = {
   applyTemplate,
   verifyAccountCredentials,
@@ -541,5 +690,9 @@ module.exports = {
   getOAuthRedirectUri,
   normalizeSmtpSettings,
   inferSmtpPreset,
-  SMTP_PRESETS
+  SMTP_PRESETS,
+  listGmailMessageIds,
+  getGmailMessage,
+  fetchGmailMessagesBatch,
+  getOAuthAccessToken
 };

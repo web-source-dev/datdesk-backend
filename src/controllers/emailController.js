@@ -3,6 +3,7 @@ const EmailAccount = require('../models/EmailAccount');
 const EmailTemplate = require('../models/EmailTemplate');
 const EmailSent = require('../models/EmailSent');
 const { encryptSecret } = require('../utils/secretCrypto');
+const { logActivity } = require('../services/activityLogService');
 const {
   applyTemplate,
   verifyAccountCredentials,
@@ -155,6 +156,17 @@ async function connectAppPassword(req, res) {
       account = await EmailAccount.findById(account._id);
     }
 
+    await logActivity({
+      userId: req.user.userId,
+      actorEmail: req.user.email,
+      action: 'email.connect',
+      category: 'email',
+      status: 'success',
+      message: `Connected ${email} via app password`,
+      meta: { accountId: String(account._id), email, method: 'app_password' },
+      req
+    });
+
     return res.status(account.wasNew ? 201 : 200).json({
       message: 'Email connected',
       account: account.toSafeJSON()
@@ -250,6 +262,23 @@ async function connectSmtp(req, res) {
       account = await EmailAccount.findById(account._id);
     }
 
+    await logActivity({
+      userId: req.user.userId,
+      actorEmail: req.user.email,
+      action: 'email.connect',
+      category: 'email',
+      status: 'success',
+      message: `Connected ${email} via SMTP`,
+      meta: {
+        accountId: String(account._id),
+        email,
+        method: 'smtp',
+        smtpHost: finalHost,
+        smtpPort: finalPort
+      },
+      req
+    });
+
     return res.status(201).json({ message: 'SMTP connected', account: account.toSafeJSON() });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to connect SMTP' });
@@ -260,6 +289,10 @@ async function disconnect(req, res) {
   try {
     const accountId = req.body?.accountId || req.query?.accountId;
     if (accountId) {
+      const existing = await EmailAccount.findOne({
+        _id: accountId,
+        userId: req.user.userId
+      });
       const result = await EmailAccount.deleteOne({
         _id: accountId,
         userId: req.user.userId
@@ -269,6 +302,16 @@ async function disconnect(req, res) {
       }
       await ensureDefaultAccount(req.user.userId);
       const accounts = await listAccounts(req.user.userId);
+      await logActivity({
+        userId: req.user.userId,
+        actorEmail: req.user.email,
+        action: 'email.disconnect',
+        category: 'email',
+        status: 'success',
+        message: `Disconnected ${existing?.email || accountId}`,
+        meta: { accountId: String(accountId), email: existing?.email || '' },
+        req
+      });
       return res.json({
         message: 'Email disconnected',
         connected: accounts.length > 0,
@@ -276,7 +319,18 @@ async function disconnect(req, res) {
       });
     }
 
+    const before = await EmailAccount.find({ userId: req.user.userId }).select('email');
     await EmailAccount.deleteMany({ userId: req.user.userId });
+    await logActivity({
+      userId: req.user.userId,
+      actorEmail: req.user.email,
+      action: 'email.disconnect',
+      category: 'email',
+      status: 'success',
+      message: `Disconnected all email accounts (${before.length})`,
+      meta: { emails: before.map((a) => a.email) },
+      req
+    });
     return res.json({ message: 'Email disconnected', connected: false, accounts: [] });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to disconnect' });
@@ -454,8 +508,9 @@ async function sendEmail(req, res) {
 
     const result = await sendMail({ account, to, subject, body });
 
+    let sentId = null;
     try {
-      await EmailSent.create({
+      const sent = await EmailSent.create({
         userId: req.user.userId,
         accountId: account._id,
         templateId: templateId || null,
@@ -467,12 +522,45 @@ async function sendEmail(req, res) {
         messageId: result?.messageId || result?.id || '',
         vars
       });
+      sentId = String(sent._id);
     } catch (logErr) {
       console.warn('[email] failed to log sent email:', logErr?.message || logErr);
     }
 
+    await logActivity({
+      userId: req.user.userId,
+      actorEmail: req.user.email,
+      action: 'email.send',
+      category: 'email',
+      status: 'success',
+      message: `Sent email to ${to}`,
+      meta: {
+        accountId: String(account._id),
+        from: account.email,
+        to,
+        subject,
+        method: account.method,
+        emailSentId: sentId,
+        messageId: result?.messageId || result?.id || ''
+      },
+      req
+    });
+
     return res.json({ message: 'Email sent', from: account.email, ...result });
   } catch (error) {
+    await logActivity({
+      userId: req.user?.userId,
+      actorEmail: req.user?.email,
+      action: 'email.send',
+      category: 'email',
+      status: 'failure',
+      message: error.message || 'Failed to send email',
+      meta: {
+        to: req.body?.to,
+        subject: req.body?.subject
+      },
+      req
+    });
     return res.status(500).json({ message: error.message || 'Failed to send email' });
   }
 }
@@ -575,6 +663,17 @@ async function oauthCallback(req, res) {
     if (!hasDefault) {
       await ensureDefaultAccount(userId, account._id);
     }
+
+    await logActivity({
+      userId,
+      actorEmail: email,
+      action: 'email.connect',
+      category: 'email',
+      status: 'success',
+      message: `Connected ${email} via Google OAuth`,
+      meta: { accountId: String(account._id), email, method: 'oauth' },
+      req
+    });
 
     return redirectOAuthResult(res, {
       status: 'ok',
