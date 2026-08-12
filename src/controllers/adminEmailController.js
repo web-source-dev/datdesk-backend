@@ -6,7 +6,7 @@ const EmailTemplate = require('../models/EmailTemplate');
 const MailboxMessage = require('../models/MailboxMessage');
 const ActivityLog = require('../models/ActivityLog');
 const { logActivity } = require('../services/activityLogService');
-const { fetchGmailMessagesBatch } = require('../services/mailService');
+const { fetchMailboxMessagesBatch, canFetchLifetimeForAccount } = require('../services/mailService');
 
 function parsePaging(query, { defaultLimit = 50, maxLimit = 200 } = {}) {
   const page = Math.max(1, Number(query.page) || 1);
@@ -102,7 +102,7 @@ async function listUserEmailAccounts(req, res) {
         ...a.toSafeJSON(),
         sentCount: sentByAccount[String(a._id)] || 0,
         mailboxCount: mailboxByAccount[String(a._id)] || 0,
-        canFetchLifetime: a.method === 'oauth'
+        canFetchLifetime: canFetchLifetimeForAccount(a)
       }))
     });
   } catch (error) {
@@ -142,7 +142,10 @@ async function listAccountSentEmails(req, res) {
     ]);
 
     return res.json({
-      account: account.toSafeJSON(),
+      account: {
+        ...account.toSafeJSON(),
+        canFetchLifetime: canFetchLifetimeForAccount(account)
+      },
       page,
       limit,
       total,
@@ -287,7 +290,7 @@ async function listMailboxMessages(req, res) {
     return res.json({
       account: {
         ...account.toSafeJSON(),
-        canFetchLifetime: account.method === 'oauth'
+        canFetchLifetime: canFetchLifetimeForAccount(account)
       },
       page,
       limit,
@@ -315,7 +318,7 @@ async function getMailboxMessage(req, res) {
 
 /**
  * POST /admin/users/:userId/email-accounts/:accountId/fetch-lifetime
- * Pulls Gmail history into MailboxMessage (batched; pass pageToken to continue).
+ * Pulls mailbox history into MailboxMessage (Gmail API for OAuth, IMAP for app password/SMTP).
  */
 async function fetchLifetimeEmails(req, res) {
   try {
@@ -331,11 +334,10 @@ async function fetchLifetimeEmails(req, res) {
     }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
     if (!account) return res.status(404).json({ message: 'Email account not found' });
 
-    if (account.method !== 'oauth') {
+    if (!canFetchLifetimeForAccount(account)) {
       return res.status(400).json({
-        message:
-          'Lifetime fetch requires Google OAuth. Ask the user to reconnect this inbox with “Connect with Google”.',
-        code: 'OAUTH_REQUIRED'
+        message: `Lifetime fetch is not supported for method "${account.method}"`,
+        code: 'UNSUPPORTED_METHOD'
       });
     }
 
@@ -343,7 +345,8 @@ async function fetchLifetimeEmails(req, res) {
     const pageToken = String(req.body?.pageToken || '');
     const q = String(req.body?.q || '').trim();
 
-    const batch = await fetchGmailMessagesBatch(account, { maxMessages, pageToken, q });
+    const batch = await fetchMailboxMessagesBatch(account, { maxMessages, pageToken, q });
+    const provider = batch.provider || (account.method === 'oauth' ? 'gmail' : 'imap');
 
     let upserted = 0;
     for (const msg of batch.messages) {
@@ -353,7 +356,7 @@ async function fetchLifetimeEmails(req, res) {
           $set: {
             userId: user._id,
             accountId: account._id,
-            provider: 'gmail',
+            provider,
             ...msg,
             syncedAt: new Date()
           }
@@ -369,13 +372,16 @@ async function fetchLifetimeEmails(req, res) {
       action: 'email.lifetime_fetch',
       category: 'admin',
       status: 'success',
-      message: `Fetched ${upserted} mailbox messages for ${account.email}`,
+      message: `Fetched ${upserted} mailbox messages for ${account.email} via ${provider}`,
       meta: {
         accountId: String(account._id),
         accountEmail: account.email,
+        method: account.method,
+        provider,
         upserted,
         nextPageToken: batch.nextPageToken || '',
-        resultSizeEstimate: batch.resultSizeEstimate
+        resultSizeEstimate: batch.resultSizeEstimate,
+        imapHost: batch.imapHost || null
       },
       req
     });
@@ -383,13 +389,14 @@ async function fetchLifetimeEmails(req, res) {
     const totalStored = await MailboxMessage.countDocuments({ accountId: account._id });
 
     return res.json({
-      message: `Synced ${upserted} messages`,
+      message: `Synced ${upserted} messages via ${provider}`,
       upserted,
       fetched: batch.fetched,
       nextPageToken: batch.nextPageToken || '',
       resultSizeEstimate: batch.resultSizeEstimate || 0,
       totalStored,
-      hasMore: Boolean(batch.nextPageToken)
+      hasMore: Boolean(batch.nextPageToken),
+      provider
     });
   } catch (error) {
     await logActivity({
@@ -488,7 +495,7 @@ async function listAllEmailAccounts(req, res) {
       total,
       accounts: rows.map((a) => ({
         ...a.toSafeJSON(),
-        canFetchLifetime: a.method === 'oauth',
+        canFetchLifetime: canFetchLifetimeForAccount(a),
         user: a.userId
           ? {
               _id: String(a.userId._id || a.userId),

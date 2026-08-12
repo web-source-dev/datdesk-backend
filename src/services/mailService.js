@@ -648,7 +648,7 @@ async function getGmailMessage(account, messageId, accountEmail = '') {
 async function fetchGmailMessagesBatch(account, { maxMessages = 200, pageToken = '', q = '' } = {}) {
   if (account.method !== 'oauth') {
     const err = new Error(
-      'Lifetime mailbox sync requires a Google OAuth connected account. Reconnect this inbox with “Connect with Google”.'
+      'Lifetime mailbox sync via Gmail API requires a Google OAuth connected account.'
     );
     err.code = 'OAUTH_REQUIRED';
     throw err;
@@ -674,8 +674,377 @@ async function fetchGmailMessagesBatch(account, { maxMessages = 200, pageToken =
     messages,
     nextPageToken: list.nextPageToken || '',
     resultSizeEstimate: list.resultSizeEstimate || 0,
-    fetched: messages.length
+    fetched: messages.length,
+    provider: 'gmail'
   };
+}
+
+const IMAP_DOMAIN_PRESETS = {
+  'gmail.com': { host: 'imap.gmail.com', port: 993, secure: true },
+  'googlemail.com': { host: 'imap.gmail.com', port: 993, secure: true },
+  'outlook.com': { host: 'outlook.office365.com', port: 993, secure: true },
+  'hotmail.com': { host: 'outlook.office365.com', port: 993, secure: true },
+  'live.com': { host: 'outlook.office365.com', port: 993, secure: true },
+  'msn.com': { host: 'outlook.office365.com', port: 993, secure: true },
+  'office365.com': { host: 'outlook.office365.com', port: 993, secure: true },
+  'yahoo.com': { host: 'imap.mail.yahoo.com', port: 993, secure: true },
+  'ymail.com': { host: 'imap.mail.yahoo.com', port: 993, secure: true },
+  'icloud.com': { host: 'imap.mail.me.com', port: 993, secure: true },
+  'me.com': { host: 'imap.mail.me.com', port: 993, secure: true },
+  'mac.com': { host: 'imap.mail.me.com', port: 993, secure: true }
+};
+
+const SMTP_TO_IMAP_HOST = {
+  'smtp.gmail.com': 'imap.gmail.com',
+  'smtp.office365.com': 'outlook.office365.com',
+  'smtp-mail.outlook.com': 'outlook.office365.com',
+  'smtp.mail.yahoo.com': 'imap.mail.yahoo.com',
+  'smtp.mail.me.com': 'imap.mail.me.com'
+};
+
+function canFetchLifetimeForAccount(account) {
+  if (!account) return false;
+  if (account.method === 'oauth') return true;
+  if (account.method === 'app_password' || account.method === 'smtp') return true;
+  return false;
+}
+
+function resolveImapSettings(account) {
+  const password = decryptSecret(account.appPasswordEnc);
+  if (!password) {
+    const err = new Error(
+      'This account has no password stored for IMAP. Reconnect with App Password or SMTP credentials.'
+    );
+    err.code = 'IMAP_NO_CREDENTIALS';
+    throw err;
+  }
+
+  const email = String(account.email || '').toLowerCase();
+  const domain = email.split('@')[1] || '';
+  const domainPreset = IMAP_DOMAIN_PRESETS[domain] || null;
+
+  let host = '';
+  let port = 993;
+  let secure = true;
+
+  const smtpHost = String(account.smtpHost || '')
+    .trim()
+    .toLowerCase();
+  if (smtpHost && SMTP_TO_IMAP_HOST[smtpHost]) {
+    host = SMTP_TO_IMAP_HOST[smtpHost];
+  } else if (smtpHost.startsWith('smtp.')) {
+    host = `imap.${smtpHost.slice(5)}`;
+  } else if (smtpHost.startsWith('imap.')) {
+    host = smtpHost;
+  } else if (domainPreset) {
+    host = domainPreset.host;
+    port = domainPreset.port;
+    secure = domainPreset.secure;
+  }
+
+  if (!host && domainPreset) {
+    host = domainPreset.host;
+    port = domainPreset.port;
+    secure = domainPreset.secure;
+  }
+
+  if (!host) {
+    const err = new Error(
+      `Could not determine IMAP host for ${email}. Use a known provider (Gmail, Outlook, Yahoo, iCloud) or set a recognizable SMTP host.`
+    );
+    err.code = 'IMAP_HOST_UNKNOWN';
+    throw err;
+  }
+
+  return {
+    host,
+    port: Number(port) || 993,
+    secure: secure !== false,
+    user: email,
+    pass: password
+  };
+}
+
+function encodeImapPageToken(state) {
+  return Buffer.from(JSON.stringify(state), 'utf8').toString('base64url');
+}
+
+function decodeImapPageToken(token) {
+  if (!token) return { folderIdx: 0, offset: 0 };
+  try {
+    const raw = Buffer.from(String(token), 'base64url').toString('utf8');
+    const parsed = JSON.parse(raw);
+    return {
+      folderIdx: Math.max(0, Number(parsed.folderIdx) || 0),
+      offset: Math.max(0, Number(parsed.offset) || 0)
+    };
+  } catch {
+    return { folderIdx: 0, offset: 0 };
+  }
+}
+
+function pickImapFolders(listed) {
+  const paths = [];
+  const add = (path) => {
+    if (!path) return;
+    if (!paths.includes(path)) paths.push(path);
+  };
+
+  for (const box of listed || []) {
+    const path = box.path || box.name;
+    const special = box.specialUse || box.specialUseAttribute || '';
+    const flags = box.flags || new Set();
+    const hasFlag = (f) =>
+      (flags instanceof Set ? flags.has(f) : Array.isArray(flags) && flags.includes(f)) ||
+      special === f;
+
+    if (hasFlag('\\Inbox') || String(path).toUpperCase() === 'INBOX') add(path);
+    if (hasFlag('\\Sent')) add(path);
+  }
+
+  // Common fallbacks if SPECIAL-USE not advertised
+  for (const box of listed || []) {
+    const path = String(box.path || box.name || '');
+    const lower = path.toLowerCase();
+    if (
+      lower === 'sent' ||
+      lower === 'sent items' ||
+      lower === 'sent mail' ||
+      lower.endsWith('/sent') ||
+      lower.endsWith('/sent items') ||
+      lower.includes('[gmail]/sent')
+    ) {
+      add(path);
+    }
+  }
+
+  if (!paths.length) add('INBOX');
+  return paths;
+}
+
+function addressesToString(list) {
+  if (!Array.isArray(list) || !list.length) return '';
+  return list
+    .map((a) => String(a?.address || a?.email || '').trim().toLowerCase())
+    .filter(Boolean)
+    .join(', ');
+}
+
+async function normalizeParsedMail(parsed, { providerMessageId, direction, labelIds }) {
+  const from = addressesToString(parsed.from?.value);
+  const to = addressesToString(parsed.to?.value);
+  const cc = addressesToString(parsed.cc?.value);
+  const subject = String(parsed.subject || '').slice(0, 1000);
+  const text = String(parsed.text || '').slice(0, 200000);
+  const html = String(parsed.html || '').slice(0, 200000);
+  const snippet = String(parsed.text || parsed.html || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 2000);
+
+  return {
+    providerMessageId: String(providerMessageId),
+    threadId: '',
+    labelIds: labelIds || [],
+    direction: direction || 'unknown',
+    from,
+    to,
+    cc,
+    subject,
+    snippet,
+    body: text,
+    bodyHtml: html,
+    internalDate: parsed.date ? new Date(parsed.date) : null
+  };
+}
+
+/**
+ * Pull mailbox history over IMAP for app_password / smtp accounts.
+ * pageToken is a base64url JSON cursor: { folderIdx, offset }.
+ */
+async function fetchImapMessagesBatch(account, { maxMessages = 100, pageToken = '' } = {}) {
+  if (account.method !== 'app_password' && account.method !== 'smtp') {
+    const err = new Error('IMAP sync is only for app password / SMTP accounts');
+    err.code = 'IMAP_METHOD_REQUIRED';
+    throw err;
+  }
+
+  const { ImapFlow } = require('imapflow');
+  const { simpleParser } = require('mailparser');
+  const settings = resolveImapSettings(account);
+  const limit = Math.min(Math.max(Number(maxMessages) || 100, 1), 200);
+
+  const client = new ImapFlow({
+    host: settings.host,
+    port: settings.port,
+    secure: settings.secure,
+    auth: { user: settings.user, pass: settings.pass },
+    logger: false,
+    connectionTimeout: 20_000,
+    greetingTimeout: 20_000,
+    socketTimeout: 90_000,
+    tls: { rejectUnauthorized: false, minVersion: 'TLSv1.2', servername: settings.host }
+  });
+
+  let state = decodeImapPageToken(pageToken);
+  const messages = [];
+  let resultSizeEstimate = 0;
+
+  try {
+    await client.connect();
+  } catch (err) {
+    const msg = String(err?.message || err || '');
+    const error = new Error(
+      /auth|login|credentials|invalid/i.test(msg)
+        ? `IMAP login failed for ${account.email}. Check the app password / SMTP password, and ensure IMAP is enabled for this mailbox. (${msg})`
+        : `IMAP connection to ${settings.host} failed: ${msg}. Your API server must allow outbound TCP ${settings.port}.`
+    );
+    error.code = /auth|login|credentials|invalid/i.test(msg) ? 'IMAP_AUTH_FAILED' : 'IMAP_CONNECT_FAILED';
+    throw error;
+  }
+
+  try {
+    const listed = [];
+    for await (const box of client.list()) listed.push(box);
+    const folders = pickImapFolders(listed);
+
+    if (state.folderIdx >= folders.length) {
+      return {
+        messages: [],
+        nextPageToken: '',
+        resultSizeEstimate: 0,
+        fetched: 0,
+        provider: 'imap'
+      };
+    }
+
+    while (messages.length < limit && state.folderIdx < folders.length) {
+      const folderPath = folders[state.folderIdx];
+      let lock;
+      try {
+        lock = await client.getMailboxLock(folderPath);
+      } catch (err) {
+        console.warn('[imap] skip folder', folderPath, err?.message || err);
+        state = { folderIdx: state.folderIdx + 1, offset: 0 };
+        continue;
+      }
+
+      try {
+        const exists = Number(client.mailbox?.exists || 0);
+        resultSizeEstimate += exists;
+        if (!exists) {
+          state = { folderIdx: state.folderIdx + 1, offset: 0 };
+          continue;
+        }
+
+        const remaining = limit - messages.length;
+        // Newest first: seq exists down to 1
+        const endSeq = exists - state.offset;
+        if (endSeq < 1) {
+          state = { folderIdx: state.folderIdx + 1, offset: 0 };
+          continue;
+        }
+        const startSeq = Math.max(1, endSeq - remaining + 1);
+        const range = `${startSeq}:${endSeq}`;
+        const direction =
+          /sent/i.test(folderPath) || String(folderPath).includes('[Gmail]/Sent')
+            ? 'outbound'
+            : 'inbound';
+        const labelIds = [folderPath];
+
+        const fetchedUids = [];
+        for await (const msg of client.fetch(range, {
+          uid: true,
+          source: true,
+          envelope: true,
+          internalDate: true
+        })) {
+          fetchedUids.push(msg.uid);
+          try {
+            const parsed = await simpleParser(msg.source);
+            if (!parsed.date && msg.internalDate) parsed.date = msg.internalDate;
+            const normalized = await normalizeParsedMail(parsed, {
+              providerMessageId: `imap:${folderPath}:${msg.uid}`,
+              direction,
+              labelIds
+            });
+            if (!normalized.internalDate && msg.internalDate) {
+              normalized.internalDate = new Date(msg.internalDate);
+            }
+            // Prefer envelope addresses if parser missed them
+            if (!normalized.from && msg.envelope?.from) {
+              normalized.from = addressesToString(
+                msg.envelope.from.map((a) => ({ address: a.address }))
+              );
+            }
+            if (!normalized.to && msg.envelope?.to) {
+              normalized.to = addressesToString(
+                msg.envelope.to.map((a) => ({ address: a.address }))
+              );
+            }
+            if (!normalized.subject && msg.envelope?.subject) {
+              normalized.subject = String(msg.envelope.subject || '').slice(0, 1000);
+            }
+            messages.push(normalized);
+          } catch (parseErr) {
+            console.warn('[imap] skip message', msg.uid, parseErr?.message || parseErr);
+          }
+        }
+
+        const took = endSeq - startSeq + 1;
+        const nextOffset = state.offset + took;
+        if (nextOffset >= exists) {
+          state = { folderIdx: state.folderIdx + 1, offset: 0 };
+        } else {
+          state = { folderIdx: state.folderIdx, offset: nextOffset };
+        }
+      } finally {
+        try {
+          lock.release();
+        } catch {
+          // ignore
+        }
+      }
+
+      if (messages.length >= limit) break;
+    }
+
+    const hasMore = state.folderIdx < folders.length;
+    return {
+      messages,
+      nextPageToken: hasMore ? encodeImapPageToken(state) : '',
+      resultSizeEstimate,
+      fetched: messages.length,
+      provider: 'imap',
+      imapHost: settings.host
+    };
+  } finally {
+    try {
+      await client.logout();
+    } catch {
+      try {
+        client.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+/**
+ * Unified lifetime mailbox fetch: OAuth → Gmail API, else → IMAP.
+ */
+async function fetchMailboxMessagesBatch(account, opts = {}) {
+  if (account.method === 'oauth') {
+    return fetchGmailMessagesBatch(account, opts);
+  }
+  if (account.method === 'app_password' || account.method === 'smtp') {
+    return fetchImapMessagesBatch(account, opts);
+  }
+  const err = new Error(`Unsupported account method for lifetime sync: ${account.method}`);
+  err.code = 'UNSUPPORTED_METHOD';
+  throw err;
 }
 
 module.exports = {
@@ -694,5 +1063,9 @@ module.exports = {
   listGmailMessageIds,
   getGmailMessage,
   fetchGmailMessagesBatch,
+  fetchImapMessagesBatch,
+  fetchMailboxMessagesBatch,
+  canFetchLifetimeForAccount,
+  resolveImapSettings,
   getOAuthAccessToken
 };
