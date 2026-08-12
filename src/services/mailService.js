@@ -905,8 +905,7 @@ async function fetchImapMessagesBatch(account, { maxMessages = 100, pageToken = 
   }
 
   try {
-    const listed = [];
-    for await (const box of client.list()) listed.push(box);
+    const listed = await client.list();
     const folders = pickImapFolders(listed);
 
     if (state.folderIdx >= folders.length) {
