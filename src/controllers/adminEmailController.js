@@ -7,6 +7,7 @@ const MailboxMessage = require('../models/MailboxMessage');
 const ActivityLog = require('../models/ActivityLog');
 const { logActivity } = require('../services/activityLogService');
 const { fetchMailboxMessagesBatch, canFetchLifetimeForAccount } = require('../services/mailService');
+const { processUnprocessedMessages } = require('../services/freightIntelligenceService');
 
 function parsePaging(query, { defaultLimit = 50, maxLimit = 200 } = {}) {
   const page = Math.max(1, Number(query.page) || 1);
@@ -366,6 +367,17 @@ async function fetchLifetimeEmails(req, res) {
       upserted += 1;
     }
 
+    // Auto-run freight intelligence on newly synced (unprocessed) messages for this account
+    let intel = null;
+    try {
+      intel = await processUnprocessedMessages({
+        limit: Math.min(upserted || maxMessages, 200),
+        accountId: account._id
+      });
+    } catch (intelErr) {
+      console.warn('[freight-intel] post-sync process failed:', intelErr?.message || intelErr);
+    }
+
     await logActivity({
       userId: user._id,
       actorEmail: req.user?.email || '',
@@ -381,7 +393,8 @@ async function fetchLifetimeEmails(req, res) {
         upserted,
         nextPageToken: batch.nextPageToken || '',
         resultSizeEstimate: batch.resultSizeEstimate,
-        imapHost: batch.imapHost || null
+        imapHost: batch.imapHost || null,
+        intelligence: intel
       },
       req
     });
@@ -396,7 +409,8 @@ async function fetchLifetimeEmails(req, res) {
       resultSizeEstimate: batch.resultSizeEstimate || 0,
       totalStored,
       hasMore: Boolean(batch.nextPageToken),
-      provider
+      provider,
+      intelligence: intel
     });
   } catch (error) {
     await logActivity({

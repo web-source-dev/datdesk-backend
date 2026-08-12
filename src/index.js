@@ -25,6 +25,7 @@ const {
   getOAuthRedirectUri,
   googleOAuthMissingKeys
 } = require('./services/mailService');
+const { startMailboxSyncCron } = require('./services/mailboxSyncService');
 
 const app = express();
 const PORT = process.env.PORT || 7020;
@@ -40,13 +41,27 @@ app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
 app.get('/health', (_req, res) => {
   const oauthConfigured = isGoogleOAuthConfigured();
+  let mailboxSync = null;
+  try {
+    mailboxSync = require('./services/mailboxSyncService').getMailboxSyncStatus();
+  } catch {
+    mailboxSync = null;
+  }
   res.json({
     ok: true,
     service: 'datdesk-backend',
     port: Number(process.env.PORT) || 7020,
     oauthConfigured,
     oauthMissing: oauthConfigured ? [] : googleOAuthMissingKeys(),
-    oauthRedirectUri: getOAuthRedirectUri()
+    oauthRedirectUri: getOAuthRedirectUri(),
+    mailboxSync: mailboxSync
+      ? {
+          enabled: mailboxSync.enabled,
+          cronExpr: mailboxSync.cronExpr,
+          running: mailboxSync.running,
+          lastRunAt: mailboxSync.lastRunAt
+        }
+      : null
   });
 });
 
@@ -85,6 +100,11 @@ async function start() {
 
   app.listen(PORT, () => {
     console.log(`[SERVER] Dat Desk backend listening on http://localhost:${PORT}`);
+    try {
+      startMailboxSyncCron();
+    } catch (err) {
+      console.warn('[mailbox-sync] failed to start cron:', err?.message || err);
+    }
   });
 }
 

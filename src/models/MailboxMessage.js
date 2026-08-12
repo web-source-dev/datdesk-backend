@@ -51,7 +51,23 @@ const mailboxMessageSchema = new mongoose.Schema(
     body: { type: String, default: '', maxlength: 200000 },
     bodyHtml: { type: String, default: '', maxlength: 200000 },
     internalDate: { type: Date, default: null, index: true },
-    syncedAt: { type: Date, default: Date.now }
+    syncedAt: { type: Date, default: Date.now },
+    /** Freight intelligence */
+    intelligenceProcessedAt: { type: Date, default: null, index: true },
+    partyType: {
+      type: String,
+      enum: ['broker', 'carrier', 'shipper', 'driver', 'dispatcher', 'internal', 'unknown'],
+      default: 'unknown',
+      index: true
+    },
+    extractedLoadNumber: { type: String, trim: true, default: '', index: true },
+    freightLoadId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'FreightLoad',
+      default: null,
+      index: true
+    },
+    intelligence: { type: mongoose.Schema.Types.Mixed, default: null }
   },
   { timestamps: true }
 );
@@ -77,11 +93,16 @@ mailboxMessageSchema.methods.toSafeJSON = function toSafeJSON(includeBody = fals
     snippet: this.snippet || '',
     internalDate: this.internalDate,
     syncedAt: this.syncedAt,
+    intelligenceProcessedAt: this.intelligenceProcessedAt || null,
+    partyType: this.partyType || 'unknown',
+    extractedLoadNumber: this.extractedLoadNumber || '',
+    freightLoadId: this.freightLoadId ? String(this.freightLoadId) : null,
     createdAt: this.createdAt
   };
   if (includeBody) {
     base.body = this.body || '';
     base.bodyHtml = this.bodyHtml || '';
+    base.intelligence = this.intelligence || null;
   }
   return base;
 };

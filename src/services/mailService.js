@@ -881,10 +881,18 @@ async function fetchImapMessagesBatch(account, { maxMessages = 100, pageToken = 
     secure: settings.secure,
     auth: { user: settings.user, pass: settings.pass },
     logger: false,
+    emitLogs: false,
     connectionTimeout: 20_000,
     greetingTimeout: 20_000,
     socketTimeout: 90_000,
+    // Avoid COMPRESS crashes when the socket drops mid-handshake
+    disableCompression: true,
     tls: { rejectUnauthorized: false, minVersion: 'TLSv1.2', servername: settings.host }
+  });
+
+  // Prevent unhandled 'error' events from crashing the whole Node process
+  client.on('error', (err) => {
+    console.warn('[imap] client error:', err?.message || err);
   });
 
   let state = decodeImapPageToken(pageToken);
@@ -894,6 +902,11 @@ async function fetchImapMessagesBatch(account, { maxMessages = 100, pageToken = 
   try {
     await client.connect();
   } catch (err) {
+    try {
+      client.close();
+    } catch {
+      // ignore
+    }
     const msg = String(err?.message || err || '');
     const error = new Error(
       /auth|login|credentials|invalid/i.test(msg)
