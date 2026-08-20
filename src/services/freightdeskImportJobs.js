@@ -1,82 +1,80 @@
 'use strict';
 
 /**
- * In-memory FreightDesk import-all jobs.
- * Long sync imports often hit reverse-proxy timeouts; the browser then
- * reports a false CORS error because the gateway 502/504 has no ACAO header.
+ * FreightDesk import-all jobs (Mongo-backed so status works across PM2 workers).
  */
 
 const crypto = require('crypto');
+const FreightdeskImportJob = require('../models/FreightdeskImportJob');
 const freightdeskImportService = require('./freightdeskImportService');
 
-const jobs = new Map();
-const JOB_TTL_MS = 60 * 60 * 1000;
-let activeJobId = null;
+const JOB_TTL_MS = 6 * 60 * 60 * 1000;
 
-function publicJob(job) {
-  if (!job) return null;
+function publicJob(doc) {
+  if (!doc) return null;
+  const obj = typeof doc.toObject === 'function' ? doc.toObject() : doc;
   return {
-    id: job.id,
-    status: job.status,
-    startedAt: job.startedAt,
-    finishedAt: job.finishedAt,
-    progress: job.progress,
-    result: job.result,
-    error: job.error,
-    message: job.message
+    id: obj._id,
+    status: obj.status,
+    startedAt: obj.startedAt,
+    finishedAt: obj.finishedAt,
+    progress: obj.progress || { imported: 0, failed: 0, total: null },
+    result: obj.result,
+    error: obj.error,
+    message: obj.message
   };
 }
 
-function getJob(jobId) {
-  return jobs.get(String(jobId || '')) || null;
+async function getJob(jobId) {
+  if (!jobId) return null;
+  return FreightdeskImportJob.findById(String(jobId)).lean();
 }
 
-function getActiveJob() {
-  if (!activeJobId) return null;
-  const job = jobs.get(activeJobId);
-  if (!job || job.status !== 'running') {
-    activeJobId = null;
-    return null;
-  }
-  return job;
+async function getActiveJob() {
+  return FreightdeskImportJob.findOne({ status: 'running' }).sort({ startedAt: -1 }).lean();
 }
 
-function startImportAllJob(options = {}) {
-  const existing = getActiveJob();
+async function patchJob(jobId, update) {
+  return FreightdeskImportJob.findByIdAndUpdate(
+    String(jobId),
+    { $set: update },
+    { new: true }
+  ).lean();
+}
+
+async function startImportAllJob(options = {}) {
+  const existing = await getActiveJob();
   if (existing) {
     const err = new Error('An import-all job is already running.');
     err.status = 409;
-    err.jobId = existing.id;
+    err.jobId = existing._id;
     throw err;
   }
 
   const id = crypto.randomUUID();
-  const job = {
-    id,
+  const job = await FreightdeskImportJob.create({
+    _id: id,
     status: 'running',
-    startedAt: new Date().toISOString(),
-    finishedAt: null,
+    startedAt: new Date(),
     options: {
       activate: Boolean(options.activate),
       channel: options.channel || 'single',
       forceReimport: options.forceReimport !== false
     },
-    progress: { imported: 0, failed: 0, total: null },
-    result: null,
-    error: null,
-    message: 'Import started'
-  };
+    progress: { imported: 0, failed: 0, total: null, current: null, phase: 'starting' },
+    message: 'Import started…'
+  });
 
-  jobs.set(id, job);
-  activeJobId = id;
-
+  // Best-effort cleanup of old finished jobs
   setTimeout(() => {
-    const current = jobs.get(id);
-    if (current && current.status !== 'running') jobs.delete(id);
-  }, JOB_TTL_MS);
+    FreightdeskImportJob.deleteMany({
+      status: { $ne: 'running' },
+      finishedAt: { $lt: new Date(Date.now() - JOB_TTL_MS) }
+    }).catch(() => {});
+  }, 1000);
 
   setImmediate(() => {
-    runJob(job).catch((err) => {
+    runJob(id).catch((err) => {
       console.error('[FreightDesk] import job failed:', err);
     });
   });
@@ -84,37 +82,65 @@ function startImportAllJob(options = {}) {
   return publicJob(job);
 }
 
-async function runJob(job) {
+async function runJob(jobId) {
   try {
-    const result = await freightdeskImportService.importAllContainers(job.options);
+    const result = await freightdeskImportService.importAllContainers({
+      ...(
+        (await FreightdeskImportJob.findById(jobId).lean())?.options || {}
+      ),
+      onProgress: async (progress) => {
+        const imported = progress.imported || 0;
+        const failed = progress.failed || 0;
+        const total = progress.total;
+        const current = progress.current || null;
+        const phase = progress.phase || 'importing';
+        const done = imported + failed;
+        const message =
+          total != null
+            ? `Importing ${done}/${total}${current ? ` · ${current}` : ''}…`
+            : `Importing${current ? ` · ${current}` : ''}…`;
+
+        await patchJob(jobId, {
+          progress: { imported, failed, total, current, phase },
+          message
+        });
+      }
+    });
 
     if (result.skipped) {
-      job.status = 'error';
-      job.error = result.reason || 'Import skipped';
-      job.message = result.reason;
-      job.finishedAt = new Date().toISOString();
-      if (activeJobId === job.id) activeJobId = null;
+      await patchJob(jobId, {
+        status: 'error',
+        error: result.reason || 'Import skipped',
+        message: result.reason || 'Import skipped',
+        finishedAt: new Date()
+      });
       return;
     }
 
-    job.status = 'done';
-    job.result = result;
-    job.progress = {
-      imported: result.imported || 0,
-      failed: result.failed || 0,
-      total: result.total || null
-    };
-    job.message =
-      result.message ||
-      `Imported ${result.imported} container(s)${result.failed ? `, ${result.failed} failed` : ''}`;
-    job.finishedAt = new Date().toISOString();
+    const message =
+      `Imported ${result.imported} container(s)` +
+      (result.failed ? `, ${result.failed} failed` : '');
+
+    await patchJob(jobId, {
+      status: 'done',
+      result,
+      progress: {
+        imported: result.imported || 0,
+        failed: result.failed || 0,
+        total: result.total || null,
+        current: null,
+        phase: 'done'
+      },
+      message,
+      finishedAt: new Date()
+    });
   } catch (err) {
-    job.status = 'error';
-    job.error = err.message || 'Import failed';
-    job.message = job.error;
-    job.finishedAt = new Date().toISOString();
-  } finally {
-    if (activeJobId === job.id) activeJobId = null;
+    await patchJob(jobId, {
+      status: 'error',
+      error: err.message || 'Import failed',
+      message: err.message || 'Import failed',
+      finishedAt: new Date()
+    });
   }
 }
 

@@ -121,7 +121,7 @@ async function importContainer(req, res) {
 async function importAllContainers(req, res) {
   try {
     // Background job — avoids reverse-proxy timeouts that look like CORS failures.
-    const job = freightdeskImportJobs.startImportAllJob({
+    const job = await freightdeskImportJobs.startImportAllJob({
       activate: Boolean(req.body?.activate),
       channel: req.body?.channel || 'single',
       forceReimport: req.body?.forceReimport !== false
@@ -129,10 +129,11 @@ async function importAllContainers(req, res) {
 
     return res.status(202).json({
       success: true,
+      isAsync: true,
       async: true,
       jobId: job.id,
       status: job.status,
-      message: 'Import started. Poll /freightdesk/import-all/:jobId for progress.'
+      message: 'Import started…'
     });
   } catch (error) {
     console.error('[FreightDesk] importAllContainers error:', error);
@@ -151,7 +152,7 @@ async function importAllContainers(req, res) {
 
 async function getImportAllJob(req, res) {
   try {
-    const job = freightdeskImportJobs.getJob(req.params.jobId);
+    const job = await freightdeskImportJobs.getJob(req.params.jobId);
     if (!job) {
       return res.status(404).json({ message: 'Import job not found (expired or invalid id).' });
     }

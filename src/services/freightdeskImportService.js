@@ -220,9 +220,32 @@ async function importAllContainers(options = {}) {
   const imported = [];
   const failed = [];
   const retryQueue = [];
+  const onProgress =
+    typeof options.onProgress === 'function' ? options.onProgress : null;
+
+  const emitProgress = async (extra = {}) => {
+    if (!onProgress) return;
+    try {
+      await onProgress({
+        imported: imported.length,
+        failed: failed.length,
+        total: containerIds.length,
+        phase: 'importing',
+        ...extra
+      });
+    } catch (err) {
+      console.warn('[FreightDesk] onProgress failed:', err?.message || err);
+    }
+  };
+
+  await emitProgress({ phase: 'starting', current: null });
 
   for (let i = 0; i < containerIds.length; i++) {
     const container = containerIds[i];
+    await emitProgress({
+      current: container,
+      phase: 'importing'
+    });
     try {
       const cookie = await importContainerFromRemote(container, {
         forceReimport: Boolean(options.forceReimport),
@@ -241,6 +264,11 @@ async function importAllContainers(options = {}) {
       failed.push({ container, error: err.message });
     }
 
+    await emitProgress({
+      current: container,
+      phase: 'importing'
+    });
+
     if (i < containerIds.length - 1) {
       await sleep(IMPORT_DELAY_MS);
     }
@@ -251,6 +279,10 @@ async function importAllContainers(options = {}) {
     await sleep(IMPORT_DELAY_MS * 2);
 
     for (const container of retryQueue) {
+      await emitProgress({
+        current: container,
+        phase: 'retrying'
+      });
       try {
         const cookie = await importContainerFromRemote(container, {
           forceReimport: Boolean(options.forceReimport),
@@ -270,6 +302,10 @@ async function importAllContainers(options = {}) {
         if (existing) existing.error = err.message;
         else failed.push({ container, error: err.message });
       }
+      await emitProgress({
+        current: container,
+        phase: 'retrying'
+      });
       await sleep(IMPORT_DELAY_MS);
     }
   }
