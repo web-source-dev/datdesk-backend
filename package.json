@@ -10,7 +10,9 @@
     "tune:freight": "node scripts/tune-freight-rules.js",
     "seed:swift-partner-admins": "node scripts/create-swift-partner-admins.js",
     "import:dathub-proxies": "node scripts/import-dathub-proxies.js",
-    "import:dathub-proxies:dry": "node scripts/import-dathub-proxies.js --dry-run"
+    "import:dathub-proxies:dry": "node scripts/import-dathub-proxies.js --dry-run",
+    "import:dathub-horizon-users": "node scripts/import-dathub-horizon-users.js",
+    "import:dathub-horizon-users:dry": "node scripts/import-dathub-horizon-users.js --dry-run"
   },
   "dependencies": {
     "adm-zip": "^0.5.18",

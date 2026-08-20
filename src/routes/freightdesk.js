@@ -7,6 +7,7 @@ const {
   listSessions,
   importContainer,
   importAllContainers,
+  getImportAllJob,
   activateImportedCookie,
   updateContainerLabel,
   setWorkingStatus
@@ -17,6 +18,7 @@ const router = express.Router();
 router.get('/status', authenticateToken, requireAdmin, getStatus);
 router.get('/sessions', authenticateToken, requireAdmin, listSessions);
 router.post('/import-all', authenticateToken, requireAdmin, importAllContainers);
+router.get('/import-all/:jobId', authenticateToken, requireAdmin, getImportAllJob);
 router.patch('/label/:container', authenticateToken, requireAdmin, updateContainerLabel);
 router.patch('/working/:container', authenticateToken, requireAdmin, setWorkingStatus);
 router.post('/import/:container', authenticateToken, requireAdmin, importContainer);

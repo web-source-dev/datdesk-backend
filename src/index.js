@@ -26,6 +26,7 @@ const {
   googleOAuthMissingKeys
 } = require('./services/mailService');
 const { startMailboxSyncCron } = require('./services/mailboxSyncService');
+const { createCorsOptions, applyCorsHeaders } = require('./utils/corsOrigins');
 
 const app = express();
 const PORT = process.env.PORT || 7020;
@@ -35,9 +36,22 @@ ensureExtensionsDir();
 
 app.set('trust proxy', 1);
 
-app.use(cors({ origin: process.env.ALLOWED_ORIGIN || '*' }));
+const corsOptions = createCorsOptions();
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
+
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+
+// Ensure CORS headers survive error responses generated after middleware
+app.use((req, res, next) => {
+  const originalJson = res.json.bind(res);
+  res.json = (body) => {
+    applyCorsHeaders(req, res);
+    return originalJson(body);
+  };
+  next();
+});
 
 app.get('/health', (_req, res) => {
   const oauthConfigured = isGoogleOAuthConfigured();
@@ -79,8 +93,9 @@ app.use('/partner/swift-solutions', partnerSwiftSolutionsRoutes);
 // Alias used by DATGO-style clients
 app.get('/file/cookies/:sessionId?', require('./middleware/auth').authenticateToken, require('./controllers/cookieController').getActiveCookieForUser);
 
-app.use((err, _req, res, _next) => {
+app.use((err, req, res, _next) => {
   console.error('[SERVER] Unhandled error:', err);
+  applyCorsHeaders(req, res);
   res.status(500).json({ message: err.message || 'Internal server error' });
 });
 

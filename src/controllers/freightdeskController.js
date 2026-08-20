@@ -2,6 +2,7 @@
 
 const freightdeskApiService = require('../services/freightdeskApiService');
 const freightdeskImportService = require('../services/freightdeskImportService');
+const freightdeskImportJobs = require('../services/freightdeskImportJobs');
 const {
   normalizeCookieChannel,
   isValidCookieChannel
@@ -119,26 +120,48 @@ async function importContainer(req, res) {
 
 async function importAllContainers(req, res) {
   try {
-    const result = await freightdeskImportService.importAllContainers({
+    // Background job — avoids reverse-proxy timeouts that look like CORS failures.
+    const job = freightdeskImportJobs.startImportAllJob({
       activate: Boolean(req.body?.activate),
       channel: req.body?.channel || 'single',
       forceReimport: req.body?.forceReimport !== false
     });
 
-    if (result.skipped) {
-      return res.status(503).json({ message: result.reason });
-    }
-
-    res.json({
+    return res.status(202).json({
       success: true,
-      ...result,
-      message: `Imported ${result.imported} container(s)${result.failed ? `, ${result.failed} failed` : ''}`
+      async: true,
+      jobId: job.id,
+      status: job.status,
+      message: 'Import started. Poll /freightdesk/import-all/:jobId for progress.'
     });
   } catch (error) {
     console.error('[FreightDesk] importAllContainers error:', error);
+    if (error.status === 409 && error.jobId) {
+      return res.status(409).json({
+        message: error.message,
+        jobId: error.jobId,
+        status: 'running'
+      });
+    }
     res.status(error.status || 500).json({
       message: error.message || 'Failed to import FreightDesk container sessions.'
     });
+  }
+}
+
+async function getImportAllJob(req, res) {
+  try {
+    const job = freightdeskImportJobs.getJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ message: 'Import job not found (expired or invalid id).' });
+    }
+    res.json({
+      success: true,
+      ...freightdeskImportJobs.publicJob(job)
+    });
+  } catch (error) {
+    console.error('[FreightDesk] getImportAllJob error:', error);
+    res.status(500).json({ message: error.message || 'Failed to read import job.' });
   }
 }
 
@@ -212,6 +235,7 @@ module.exports = {
   listSessions,
   importContainer,
   importAllContainers,
+  getImportAllJob,
   activateImportedCookie,
   updateContainerLabel,
   setWorkingStatus
