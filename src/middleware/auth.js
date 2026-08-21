@@ -21,7 +21,9 @@ async function authenticateToken(req, res, next) {
       });
     }
 
-    const user = await User.findById(payload.userId).select('activeSessionId isBanned role email');
+    const user = await User.findById(payload.userId).select(
+      'activeSessionId isBanned role email permissions'
+    );
     if (!user) {
       return res.status(401).json({
         message: 'Please sign in again.',
@@ -49,7 +51,8 @@ async function authenticateToken(req, res, next) {
       userId: payload.userId,
       email: payload.email || user.email,
       role: payload.role || user.role,
-      sessionId: payload.sessionId
+      sessionId: payload.sessionId,
+      permissions: user.permissions || null
     };
     next();
   } catch (error) {

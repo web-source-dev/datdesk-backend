@@ -4,6 +4,8 @@ const DEFAULT_PERMISSIONS = {
   datMultitabNumbers: 1,
   webMultitab: false,
   webMultitabNumbers: 1,
+  /** Load managed Chromium extensions (DAT Email, etc.) into the desktop apps */
+  extensionsEnabled: true,
   customTabs: []
 };
 
@@ -41,8 +43,13 @@ function normalizePermissions(input = {}) {
     datMultitabNumbers: clampTabCount(src.datMultitabNumbers, 1),
     webMultitab: !!src.webMultitab,
     webMultitabNumbers: clampTabCount(src.webMultitabNumbers, 1),
+    extensionsEnabled: src.extensionsEnabled !== false,
     customTabs
   };
+}
+
+function isExtensionsEnabled(permissions) {
+  return normalizePermissions(permissions).extensionsEnabled !== false;
 }
 
 function getEnabledCustomTabs(permissions) {
@@ -54,5 +61,6 @@ module.exports = {
   DEFAULT_PERMISSIONS,
   normalizePermissions,
   getEnabledCustomTabs,
+  isExtensionsEnabled,
   clampTabCount
 };

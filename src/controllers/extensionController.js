@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const AdmZip = require('adm-zip');
 const ManagedExtension = require('../models/ManagedExtension');
+const { isExtensionsEnabled } = require('../utils/permissions');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR
   ? path.resolve(process.env.UPLOADS_DIR)
@@ -80,8 +81,12 @@ async function listExtensions(_req, res) {
   }
 }
 
-async function listEnabledForUser(_req, res) {
+async function listEnabledForUser(req, res) {
   try {
+    if (!isExtensionsEnabled(req.user?.permissions)) {
+      return res.json({ success: true, data: [], disabled: true });
+    }
+
     const extensions = await ManagedExtension.find({ enabled: true })
       .select('name slug version description fileSize updatedAt createdAt')
       .sort({ name: 1 });
@@ -243,6 +248,9 @@ async function downloadExtension(req, res) {
     if (!ext) return res.status(404).json({ message: 'Extension not found' });
 
     const isAdmin = req.user?.role === 'admin';
+    if (!isAdmin && !isExtensionsEnabled(req.user?.permissions)) {
+      return res.status(403).json({ message: 'Extensions are disabled for this account' });
+    }
     if (!ext.enabled && !isAdmin) {
       return res.status(403).json({ message: 'Extension is not enabled' });
     }

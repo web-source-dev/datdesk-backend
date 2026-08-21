@@ -58,10 +58,16 @@ async function login(req, res) {
       return res.status(401).json({ message: 'Invalid email or password' });
     }
 
-    // New login creates a new session and invalidates any previous device
-    const sessionId = createSessionId();
-    user.activeSessionId = sessionId;
-    await user.save({ validateBeforeSave: false });
+    // Desktop/admin login rotates the session (one device). The email extension
+    // reuses the active session so signing in there does not kick the desk app.
+    const reuseSession =
+      req.body?.reuseSession === true || String(req.body?.client || '') === 'extension';
+    let sessionId = reuseSession ? user.activeSessionId : null;
+    if (!sessionId) {
+      sessionId = createSessionId();
+      user.activeSessionId = sessionId;
+      await user.save({ validateBeforeSave: false });
+    }
 
     const token = generateToken(user, sessionId);
     const enriched = await enrichUser(user);

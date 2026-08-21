@@ -26,6 +26,8 @@ const permissionsSchema = new mongoose.Schema(
     /** Allow multiple Electron browser tabs in the DAT window */
     webMultitab: { type: Boolean, default: false },
     webMultitabNumbers: { type: Number, default: 1, min: 1, max: 10 },
+    /** Load managed Chromium extensions into Dat Desk / Horizon / Swift */
+    extensionsEnabled: { type: Boolean, default: true },
     /** In-app custom tab buttons on the desktop dashboard */
     customTabs: { type: [customTabSchema], default: [] }
   },
