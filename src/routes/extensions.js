@@ -1,6 +1,7 @@
 const express = require('express');
 const multer = require('multer');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
+const { MAX_UPLOAD_BYTES, isTooLargeError, tooLargeMessage } = require('../utils/uploadLimits');
 const {
   listExtensions,
   listEnabledForUser,
@@ -14,7 +15,7 @@ const router = express.Router();
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 50 * 1024 * 1024 },
+  limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter: (_req, file, cb) => {
     const ok =
       /\.zip$/i.test(file.originalname || '') ||
@@ -34,7 +35,12 @@ router.post(
   requireAdmin,
   (req, res, next) => {
     upload.single('file')(req, res, (err) => {
-      if (err) return res.status(400).json({ message: err.message || 'Upload failed' });
+      if (err) {
+        const tooLarge = isTooLargeError(err);
+        return res.status(tooLarge ? 413 : 400).json({
+          message: tooLarge ? tooLargeMessage() : err.message || 'Upload failed'
+        });
+      }
       next();
     });
   },

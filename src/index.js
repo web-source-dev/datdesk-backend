@@ -27,6 +27,7 @@ const {
 } = require('./services/mailService');
 const { startMailboxSyncCron } = require('./services/mailboxSyncService');
 const { createCorsOptions, applyCorsHeaders } = require('./utils/corsOrigins');
+const { isTooLargeError, tooLargeMessage } = require('./utils/uploadLimits');
 
 const app = express();
 const PORT = process.env.PORT || 7020;
@@ -40,11 +41,17 @@ const corsOptions = createCorsOptions();
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-app.use(express.json({ limit: '20mb' }));
-app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
 // Ensure CORS headers survive error responses generated after middleware
 app.use((req, res, next) => {
+  applyCorsHeaders(req, res);
+  const originalWriteHead = res.writeHead;
+  res.writeHead = function writeHeadWithCors(...args) {
+    applyCorsHeaders(req, res);
+    return originalWriteHead.apply(this, args);
+  };
   const originalJson = res.json.bind(res);
   res.json = (body) => {
     applyCorsHeaders(req, res);
@@ -94,8 +101,11 @@ app.use('/partner/swift-solutions', partnerSwiftSolutionsRoutes);
 app.get('/file/cookies/:sessionId?', require('./middleware/auth').authenticateToken, require('./controllers/cookieController').getActiveCookieForUser);
 
 app.use((err, req, res, _next) => {
-  console.error('[SERVER] Unhandled error:', err);
   applyCorsHeaders(req, res);
+  if (isTooLargeError(err)) {
+    return res.status(413).json({ message: tooLargeMessage() });
+  }
+  console.error('[SERVER] Unhandled error:', err);
   res.status(500).json({ message: err.message || 'Internal server error' });
 });
 
