@@ -492,7 +492,7 @@ function buildGoogleAuthUrl(state) {
     response_type: 'code',
     scope: ['https://mail.google.com/', 'email', 'profile'].join(' '),
     access_type: 'offline',
-    prompt: 'consent',
+    prompt: 'select_account consent',
     state: String(state || '')
   });
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;

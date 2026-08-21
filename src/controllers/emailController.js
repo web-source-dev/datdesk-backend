@@ -565,27 +565,106 @@ async function sendEmail(req, res) {
   }
 }
 
-function getOAuthWebRedirectBase() {
-  return String(
-    process.env.OAUTH_WEB_REDIRECT_URL ||
-      process.env.WEB_REDIRECT_URL ||
-      'http://localhost:5174'
-  ).replace(/\/$/, '');
+function escapeHtml(value) {
+  return String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function oauthResultHtml({ ok, email, message }) {
+  const title = ok ? 'Inbox connected' : "Couldn't connect that inbox";
+  const emailLine = email
+    ? `<p class="email">${escapeHtml(email)}</p>`
+    : '';
+  const desc = ok
+    ? 'You can close this window and return to DAT.'
+    : escapeHtml(message || 'Google denied the request or the window was closed before approval.');
+  const payload = JSON.stringify({
+    type: 'DAT_EMAIL_OAUTH_DONE',
+    ok: Boolean(ok),
+    email: email || '',
+    message: message || ''
+  }).replace(/</g, '\\u003c');
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    :root { font-family: "Segoe UI", system-ui, sans-serif; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; min-height: 100%; background: #f1f5f9; color: #1e293b; }
+    .wrap { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+    .card {
+      width: min(380px, 100%);
+      background: #fff;
+      border: 1px solid #e2e8f0;
+      border-radius: 8px;
+      padding: 32px 24px 24px;
+      text-align: center;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+    }
+    .mark {
+      width: 56px; height: 56px; margin: 0 auto 16px; border-radius: 50%;
+      display: grid; place-items: center; font-size: 28px;
+      background: ${ok ? '#d1fae5' : '#fee2e2'};
+      color: ${ok ? '#059669' : '#dc2626'};
+    }
+    h1 { margin: 0 0 8px; font-size: 18px; }
+    p { margin: 0 0 10px; color: #475569; font-size: 13px; line-height: 1.45; }
+    .email { font-weight: 700; color: #0f172a; word-break: break-all; }
+    button {
+      margin-top: 12px; height: 36px; min-width: 120px; padding: 0 16px;
+      border: 0; border-radius: 4px; background: #2563eb; color: #fff;
+      font: 600 13px/1 "Segoe UI", system-ui, sans-serif; cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="mark">${ok ? '✓' : '!'}</div>
+      <h1>${escapeHtml(title)}</h1>
+      ${emailLine}
+      <p>${desc}</p>
+      <button type="button" id="close-btn">Close</button>
+    </div>
+  </div>
+  <script>
+    (function () {
+      var payload = ${payload};
+      try {
+        if (window.opener && !window.opener.closed) {
+          window.opener.postMessage(payload, '*');
+        }
+      } catch (e) {}
+      try {
+        localStorage.setItem('dat-email-oauth-result', JSON.stringify(Object.assign({}, payload, { at: Date.now() })));
+      } catch (e) {}
+      document.getElementById('close-btn').addEventListener('click', function () {
+        try { window.close(); } catch (e) {}
+      });
+      ${ok ? 'setTimeout(function () { try { window.close(); } catch (e) {} }, 1600);' : ''}
+    })();
+  </script>
+</body>
+</html>`;
 }
 
 function redirectOAuthResult(res, params) {
-  try {
-    const url = new URL(`${getOAuthWebRedirectBase()}/`);
-    Object.entries(params || {}).forEach(([key, value]) => {
-      if (value == null || value === '') return;
-      url.searchParams.set(key, String(value));
-    });
-    return res.redirect(302, url.toString());
-  } catch (err) {
-    return res
-      .status(500)
-      .send(`OAuth finished but redirect failed: ${err.message || 'unknown error'}`);
-  }
+  const ok = String(params?.status || '').toLowerCase() === 'ok';
+  const html = oauthResultHtml({
+    ok,
+    email: params?.email,
+    message: params?.message
+  });
+  res.setHeader('Content-Type', 'text/html; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-store');
+  return res.status(ok ? 200 : 400).send(html);
 }
 
 async function getOAuthUrl(req, res) {
@@ -604,7 +683,6 @@ async function getOAuthUrl(req, res) {
     const state = signOAuthState(req.user.userId);
     return res.json({
       url: buildGoogleAuthUrl(state),
-      redirectPage: getOAuthWebRedirectBase(),
       redirectUri: getOAuthRedirectUri()
     });
   } catch (error) {
