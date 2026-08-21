@@ -21,6 +21,9 @@ const managedExtensionSchema = new mongoose.Schema(
     fileName: { type: String, required: true },
     originalFileName: { type: String, default: '' },
     fileSize: { type: Number, default: 0 },
+    /** GridFS id in bucket `extensionPackages` — shared across all API hosts */
+    gridFsId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    contentHash: { type: String, default: '', index: true },
     enabled: { type: Boolean, default: true, index: true },
     extensionId: { type: String, default: null }
   },

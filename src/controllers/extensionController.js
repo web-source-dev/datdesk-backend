@@ -3,6 +3,13 @@ const path = require('path');
 const AdmZip = require('adm-zip');
 const ManagedExtension = require('../models/ManagedExtension');
 const { isExtensionsEnabled } = require('../utils/permissions');
+const {
+  sha256,
+  saveExtensionPackage,
+  deleteExtensionPackage,
+  readExtensionPackage,
+  fetchPackageFromPrimary
+} = require('../utils/extensionPackages');
 
 const UPLOADS_DIR = process.env.UPLOADS_DIR
   ? path.resolve(process.env.UPLOADS_DIR)
@@ -88,7 +95,7 @@ async function listEnabledForUser(req, res) {
     }
 
     const extensions = await ManagedExtension.find({ enabled: true })
-      .select('name slug version description fileSize updatedAt createdAt')
+      .select('name slug version description fileSize updatedAt createdAt contentHash')
       .sort({ name: 1 });
 
     return res.json({
@@ -100,7 +107,8 @@ async function listEnabledForUser(req, res) {
         version: ext.version,
         description: ext.description,
         fileSize: ext.fileSize,
-        updatedAt: ext.updatedAt
+        updatedAt: ext.updatedAt,
+        contentHash: ext.contentHash || null
       }))
     });
   } catch (error) {
@@ -146,7 +154,25 @@ async function uploadExtension(req, res) {
     const filePath = path.join(EXTENSIONS_DIR, storedFileName);
     fs.writeFileSync(filePath, req.file.buffer);
 
+    let gridFsId;
+    try {
+      gridFsId = await saveExtensionPackage(req.file.buffer, storedFileName);
+    } catch (err) {
+      try {
+        fs.unlinkSync(filePath);
+      } catch {
+        // ignore
+      }
+      console.error('[EXTENSION] GridFS save failed:', err);
+      return res.status(500).json({
+        message: 'Failed to store extension package in the database. All API hosts need the ZIP in Mongo to serve it.'
+      });
+    }
+
+    const contentHash = sha256(req.file.buffer);
+
     if (existing) {
+      const previousGridFsId = existing.gridFsId;
       if (existing.fileName) {
         const oldPath = path.join(EXTENSIONS_DIR, existing.fileName);
         if (fs.existsSync(oldPath)) {
@@ -164,8 +190,11 @@ async function uploadExtension(req, res) {
       existing.originalFileName = originalName;
       existing.fileSize = req.file.buffer.length;
       existing.enabled = enabled;
+      existing.gridFsId = gridFsId;
+      existing.contentHash = contentHash;
       if (inspected.extensionId) existing.extensionId = inspected.extensionId;
       await existing.save();
+      await deleteExtensionPackage(previousGridFsId);
       return res.json({ success: true, message: 'Extension package updated', data: existing });
     }
 
@@ -178,7 +207,9 @@ async function uploadExtension(req, res) {
       originalFileName: originalName,
       fileSize: req.file.buffer.length,
       enabled,
-      extensionId: inspected.extensionId || null
+      extensionId: inspected.extensionId || null,
+      gridFsId,
+      contentHash
     });
 
     return res.status(201).json({ success: true, message: 'Extension uploaded', data: created });
@@ -234,12 +265,58 @@ async function deleteExtension(req, res) {
       }
     }
 
+    await deleteExtensionPackage(ext.gridFsId);
     await ext.deleteOne();
     return res.json({ success: true, message: 'Extension deleted' });
   } catch (error) {
     console.error('[EXTENSION] Delete error:', error);
     return res.status(500).json({ message: 'Internal server error' });
   }
+}
+
+async function persistPackageLocally(ext, buffer, { replaceGridFs = false } = {}) {
+  if (!ext || !buffer?.length) return;
+  try {
+    if (replaceGridFs && ext.gridFsId) {
+      await deleteExtensionPackage(ext.gridFsId);
+      ext.gridFsId = null;
+    }
+    if (!ext.gridFsId) {
+      ext.gridFsId = await saveExtensionPackage(buffer, ext.fileName || `${ext.slug}.zip`);
+    }
+    if (!ext.contentHash) ext.contentHash = sha256(buffer);
+    if (!ext.fileSize) ext.fileSize = buffer.length;
+    ensureExtensionsDir();
+    if (ext.fileName) {
+      const filePath = path.join(EXTENSIONS_DIR, ext.fileName);
+      if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, buffer);
+    }
+    await ext.save();
+  } catch (err) {
+    console.warn('[EXTENSION] Failed to persist package locally:', err.message);
+  }
+}
+
+async function resolvePackageBuffer(req, ext) {
+  const fromGrid = await readExtensionPackage(ext.gridFsId);
+  if (fromGrid?.length) return fromGrid;
+
+  const filePath = ext.fileName ? path.join(EXTENSIONS_DIR, ext.fileName) : '';
+  if (filePath && fs.existsSync(filePath)) {
+    const fromDisk = fs.readFileSync(filePath);
+    if (fromDisk?.length) {
+      persistPackageLocally(ext, fromDisk, { replaceGridFs: Boolean(ext.gridFsId) }).catch(() => {});
+      return fromDisk;
+    }
+  }
+
+  const fromPrimary = await fetchPackageFromPrimary(req, ext._id);
+  if (fromPrimary?.length) {
+    persistPackageLocally(ext, fromPrimary, { replaceGridFs: Boolean(ext.gridFsId) }).catch(() => {});
+    return fromPrimary;
+  }
+
+  return null;
 }
 
 async function downloadExtension(req, res) {
@@ -255,9 +332,12 @@ async function downloadExtension(req, res) {
       return res.status(403).json({ message: 'Extension is not enabled' });
     }
 
-    const filePath = path.join(EXTENSIONS_DIR, ext.fileName);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ message: 'Extension package file missing on server' });
+    const buffer = await resolvePackageBuffer(req, ext);
+    if (!buffer?.length) {
+      return res.status(404).json({
+        message:
+          'Extension package file missing on server. Re-upload the ZIP in Admin → Extensions so it is stored in the shared database.'
+      });
     }
 
     res.setHeader('Content-Type', 'application/zip');
@@ -265,18 +345,46 @@ async function downloadExtension(req, res) {
       'Content-Disposition',
       `attachment; filename="${ext.slug}-${ext.version}.zip"`
     );
+    res.setHeader('Content-Length', String(buffer.length));
     res.setHeader('X-Extension-Slug', ext.slug);
     res.setHeader('X-Extension-Version', ext.version);
-
-    const stream = fs.createReadStream(filePath);
-    stream.on('error', (err) => {
-      console.error('[EXTENSION] Download stream error:', err);
-      if (!res.headersSent) res.status(500).json({ message: 'Failed to stream extension' });
-    });
-    stream.pipe(res);
+    if (ext.contentHash) res.setHeader('X-Extension-Hash', ext.contentHash);
+    return res.send(buffer);
   } catch (error) {
     console.error('[EXTENSION] Download error:', error);
     return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
+/**
+ * Copy any ZIP still sitting on this host's disk into GridFS so other API
+ * hosts (api.datdesk / Render) can serve it.
+ */
+async function backfillExtensionPackagesFromDisk() {
+  ensureExtensionsDir();
+  const missing = await ManagedExtension.find({
+    $or: [{ gridFsId: null }, { gridFsId: { $exists: false } }]
+  });
+  let stored = 0;
+  for (const ext of missing) {
+    if (!ext.fileName) continue;
+    const filePath = path.join(EXTENSIONS_DIR, ext.fileName);
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      const buffer = fs.readFileSync(filePath);
+      if (!buffer.length) continue;
+      ext.gridFsId = await saveExtensionPackage(buffer, ext.fileName);
+      ext.contentHash = ext.contentHash || sha256(buffer);
+      ext.fileSize = ext.fileSize || buffer.length;
+      await ext.save();
+      stored += 1;
+      console.log(`[EXTENSION] Backfilled ${ext.slug}@${ext.version} (${buffer.length} bytes) into Mongo`);
+    } catch (err) {
+      console.warn(`[EXTENSION] Backfill failed for ${ext.slug}:`, err.message);
+    }
+  }
+  if (stored) {
+    console.log(`[EXTENSION] Backfilled ${stored} package(s) from local disk into GridFS`);
   }
 }
 
@@ -288,5 +396,6 @@ module.exports = {
   deleteExtension,
   downloadExtension,
   ensureExtensionsDir,
+  backfillExtensionPackagesFromDisk,
   EXTENSIONS_DIR
 };

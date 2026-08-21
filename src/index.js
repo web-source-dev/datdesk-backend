@@ -19,7 +19,10 @@ const emailRoutes = require('./routes/email');
 const adminRoutes = require('./routes/admin');
 const partnerSwiftSolutionsRoutes = require('./routes/partnerSwiftSolutions');
 const { ensureCookiesDir } = require('./utils/cookies');
-const { ensureExtensionsDir } = require('./controllers/extensionController');
+const {
+  ensureExtensionsDir,
+  backfillExtensionPackagesFromDisk
+} = require('./controllers/extensionController');
 const {
   isGoogleOAuthConfigured,
   getOAuthRedirectUri,
@@ -113,6 +116,12 @@ async function start() {
   const uri = process.env.MONGODB_URI || 'mongodb://localhost:27017/newdatapp';
   await mongoose.connect(uri);
   console.log('[DB] Connected:', uri.replace(/\/\/([^:]+):([^@]+)@/, '//$1:***@'));
+
+  try {
+    await backfillExtensionPackagesFromDisk();
+  } catch (err) {
+    console.warn('[EXTENSION] Disk backfill skipped:', err.message);
+  }
 
   if (isGoogleOAuthConfigured()) {
     console.log('[EMAIL] Google OAuth: configured →', getOAuthRedirectUri());
