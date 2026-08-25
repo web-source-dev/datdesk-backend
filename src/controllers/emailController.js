@@ -696,15 +696,9 @@ function oauthResultHtml({ ok, email, message }) {
       background: #fff;
       border: 1px solid #e2e8f0;
       border-radius: 8px;
-      padding: 32px 24px 24px;
+      padding: 28px 24px 24px;
       text-align: center;
       box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
-    }
-    .mark {
-      width: 56px; height: 56px; margin: 0 auto 16px; border-radius: 50%;
-      display: grid; place-items: center; font-size: 28px;
-      background: ${ok ? '#d1fae5' : '#fee2e2'};
-      color: ${ok ? '#059669' : '#dc2626'};
     }
     h1 { margin: 0 0 8px; font-size: 18px; }
     p { margin: 0 0 10px; color: #475569; font-size: 13px; line-height: 1.45; }
@@ -720,7 +714,6 @@ function oauthResultHtml({ ok, email, message }) {
 <body>
   <div class="wrap">
     <div class="card">
-      <div class="mark">${ok ? '✓' : '!'}</div>
       <h1>${escapeHtml(title)}</h1>
       ${emailLine}
       <p>${desc}</p>
