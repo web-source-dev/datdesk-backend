@@ -4,7 +4,7 @@ const DEFAULT_PERMISSIONS = {
   datMultitabNumbers: 1,
   webMultitab: false,
   webMultitabNumbers: 1,
-  /** Load managed Chromium extensions (DAT Email, etc.) into the desktop apps */
+  /** Load managed Chromium extensions (Signal, etc.) into the desktop apps */
   extensionsEnabled: true,
   customTabs: []
 };
