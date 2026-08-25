@@ -11,6 +11,7 @@ const {
   deleteTemplate,
   sendEmail,
   getOAuthUrl,
+  getOAuthResult,
   oauthCallback
 } = require('../controllers/emailController');
 const { authenticateToken } = require('../middleware/auth');
@@ -25,6 +26,7 @@ router.post('/connect/smtp', authenticateToken, connectSmtp);
 router.post('/disconnect', authenticateToken, disconnect);
 router.post('/accounts/default', authenticateToken, setDefaultAccount);
 router.get('/oauth/url', authenticateToken, getOAuthUrl);
+router.get('/oauth/result', authenticateToken, getOAuthResult);
 
 router.get('/templates', authenticateToken, listTemplates);
 router.post('/templates', authenticateToken, createTemplate);

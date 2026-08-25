@@ -19,22 +19,114 @@ const {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-function oauthStateSecret() {
-  return process.env.EMAIL_SECRET || process.env.JWT_SECRET || 'default-secret-change-this';
+/** In-memory OAuth progress so the extension can leave the waiting screen on cancel. */
+const oauthResults = new Map();
+
+function rememberOAuth(userId, patch) {
+  if (!userId) return;
+  const id = String(userId);
+  oauthResults.set(id, { ...(oauthResults.get(id) || {}), ...patch, at: Date.now() });
 }
 
-function signOAuthState(userId) {
-  return jwt.sign({ userId: String(userId), purpose: 'gmail_oauth' }, oauthStateSecret(), {
-    expiresIn: '15m'
-  });
+function oauthStateSecrets() {
+  return [
+    ...new Set(
+      [
+        process.env.GOOGLE_CLIENT_SECRET,
+        process.env.EMAIL_SECRET,
+        process.env.JWT_SECRET,
+        'default-secret-change-this'
+      ].filter(Boolean)
+    )
+  ];
 }
 
-function verifyOAuthState(state) {
-  const payload = jwt.verify(String(state || ''), oauthStateSecret());
-  if (payload.purpose !== 'gmail_oauth' || !payload.userId) {
-    throw new Error('Invalid OAuth state');
+function signOAuthState(userId, redirectUri) {
+  return jwt.sign(
+    {
+      userId: String(userId),
+      purpose: 'gmail_oauth',
+      redirectUri: redirectUri ? String(redirectUri) : undefined
+    },
+    oauthStateSecrets()[0],
+    { expiresIn: '15m' }
+  );
+}
+
+function verifyOAuthStateStrict(state) {
+  const raw = String(state || '');
+  for (const secret of oauthStateSecrets()) {
+    try {
+      const payload = jwt.verify(raw, secret);
+      if (payload.purpose === 'gmail_oauth' && payload.userId) return payload;
+    } catch {
+      // next secret
+    }
   }
-  return payload;
+  return null;
+}
+
+function decodeOAuthState(state) {
+  try {
+    const payload = jwt.decode(String(state || ''));
+    if (payload?.purpose === 'gmail_oauth' && payload.userId) return payload;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+function isLoopbackHost(host) {
+  const h = String(host || '').split(':')[0].toLowerCase().replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
+}
+
+function cloudOAuthCallbackUrl() {
+  const explicit = String(process.env.OAUTH_CLOUD_CALLBACK_URL || '').trim();
+  if (explicit) return explicit.replace(/\/+$/, '');
+  const publicApi = String(process.env.PUBLIC_API_URL || '').trim().replace(/\/+$/, '');
+  if (publicApi && !/localhost|127\.0\.0\.1/i.test(publicApi)) {
+    return `${publicApi}/email/oauth/callback`;
+  }
+  return 'https://api.datdesk.apexskillzone.com/email/oauth/callback';
+}
+
+function shouldFinishOnCloud(req) {
+  const host = String(req.get('x-forwarded-host') || req.get('host') || '');
+  if (!isLoopbackHost(host)) return false;
+  try {
+    const cloud = new URL(cloudOAuthCallbackUrl());
+    return !isLoopbackHost(cloud.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function finishOAuthOnCloud(req) {
+  const target = new URL(cloudOAuthCallbackUrl());
+  for (const [key, value] of Object.entries(req.query || {})) {
+    if (value == null || value === '') continue;
+    target.searchParams.set(key, Array.isArray(value) ? String(value[0]) : String(value));
+  }
+  let cloudRes;
+  try {
+    cloudRes = await fetch(target.toString(), {
+      method: 'GET',
+      headers: { Accept: 'text/html', 'User-Agent': 'DatDesk-OAuth-Forward/1' },
+      redirect: 'follow'
+    });
+  } catch (err) {
+    return { ok: false, email: '', message: err.message || 'Could not reach the cloud API', status: 0 };
+  }
+  const html = await cloudRes.text();
+  const ok = /inbox connected/i.test(html);
+  let email = '';
+  const emailMatch = html.match(/class="email">([^<]+)/i);
+  if (emailMatch) email = String(emailMatch[1] || '').trim();
+  let message = '';
+  const msgMatch = html.match(/<p>([^<]+)<\/p>/i);
+  if (msgMatch && !ok) message = String(msgMatch[1] || '').trim();
+  return { ok, email, message, status: cloudRes.status };
 }
 
 async function listAccounts(userId) {
@@ -580,7 +672,7 @@ function oauthResultHtml({ ok, email, message }) {
     ? `<p class="email">${escapeHtml(email)}</p>`
     : '';
   const desc = ok
-    ? 'You can close this window and return to DAT.'
+    ? 'You can close this window and return to DAT. If Close does nothing, use the X on the window.'
     : escapeHtml(message || 'Google denied the request or the window was closed before approval.');
   const payload = JSON.stringify({
     type: 'DAT_EMAIL_OAUTH_DONE',
@@ -619,9 +711,10 @@ function oauthResultHtml({ ok, email, message }) {
     .email { font-weight: 700; color: #0f172a; word-break: break-all; }
     button {
       margin-top: 12px; height: 36px; min-width: 120px; padding: 0 16px;
-      border: 0; border-radius: 4px; background: #2563eb; color: #fff;
+      border: 0; border-radius: 4px; background: #0b6bcb; color: #fff;
       font: 600 13px/1 "Segoe UI", system-ui, sans-serif; cursor: pointer;
     }
+    .hint { display: none; margin-top: 8px; font-size: 12px; color: #64748b; }
   </style>
 </head>
 <body>
@@ -631,7 +724,8 @@ function oauthResultHtml({ ok, email, message }) {
       <h1>${escapeHtml(title)}</h1>
       ${emailLine}
       <p>${desc}</p>
-      <button type="button" id="close-btn">Close</button>
+      <button type="button" id="close-btn">Close window</button>
+      <p class="hint" id="close-hint">Chrome blocks closing this window automatically. Click the X in the corner to close it.</p>
     </div>
   </div>
   <script>
@@ -645,10 +739,22 @@ function oauthResultHtml({ ok, email, message }) {
       try {
         localStorage.setItem('dat-email-oauth-result', JSON.stringify(Object.assign({}, payload, { at: Date.now() })));
       } catch (e) {}
-      document.getElementById('close-btn').addEventListener('click', function () {
+      var btn = document.getElementById('close-btn');
+      var hint = document.getElementById('close-hint');
+      function showHint() {
+        if (hint) hint.style.display = 'block';
+        if (btn) btn.textContent = 'Use the window X';
+      }
+      function tryClose() {
+        try { window.open('', '_self'); } catch (e) {}
         try { window.close(); } catch (e) {}
-      });
-      ${ok ? 'setTimeout(function () { try { window.close(); } catch (e) {} }, 1600);' : ''}
+        try { window.top.close(); } catch (e) {}
+        setTimeout(function () {
+          if (!window.closed) showHint();
+        }, 150);
+      }
+      if (btn) btn.addEventListener('click', tryClose);
+      ${ok ? 'setTimeout(tryClose, 800);' : ''}
     })();
   </script>
 </body>
@@ -664,7 +770,7 @@ function redirectOAuthResult(res, params) {
   });
   res.setHeader('Content-Type', 'text/html; charset=utf-8');
   res.setHeader('Cache-Control', 'no-store');
-  return res.status(ok ? 200 : 400).send(html);
+  return res.status(200).send(html);
 }
 
 async function getOAuthUrl(req, res) {
@@ -680,30 +786,64 @@ async function getOAuthUrl(req, res) {
         missing
       });
     }
-    const state = signOAuthState(req.user.userId);
+    const redirectUri = getOAuthRedirectUri(req);
+    const state = signOAuthState(req.user.userId, redirectUri);
+    rememberOAuth(req.user.userId, { status: 'pending', email: '', message: '' });
     return res.json({
-      url: buildGoogleAuthUrl(state),
-      redirectUri: getOAuthRedirectUri()
+      url: buildGoogleAuthUrl(state, redirectUri),
+      redirectUri
     });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to start Google connect' });
   }
 }
 
+async function getOAuthResult(req, res) {
+  const row = oauthResults.get(String(req.user.userId)) || { status: 'idle' };
+  return res.json(row);
+}
+
 async function oauthCallback(req, res) {
-  const fail = (msg) =>
-    redirectOAuthResult(res, {
+  const fail = (msg, userId) => {
+    rememberOAuth(userId, { status: 'error', message: String(msg || 'OAuth failed').slice(0, 300) });
+    return redirectOAuthResult(res, {
       status: 'error',
       message: String(msg || 'OAuth failed').slice(0, 300)
     });
+  };
 
+  let userId = null;
   try {
     const { code, state, error, error_description: errorDescription } = req.query || {};
-    if (error) return fail(errorDescription || error);
-    if (!code || !state) return fail('Missing OAuth code');
+    if (error) return fail(errorDescription || error, userId);
+    if (!code || !state) return fail('Missing OAuth code', userId);
 
-    const { userId } = verifyOAuthState(state);
-    const tokens = await exchangeGoogleCode(String(code));
+    const verified = verifyOAuthStateStrict(state);
+    const decoded = decodeOAuthState(state);
+    userId = (verified && verified.userId) || (decoded && decoded.userId) || userId;
+
+    // Old Google clients may still land on localhost. Finish on the public API.
+    if (shouldFinishOnCloud(req)) {
+      console.log('[EMAIL] OAuth callback on localhost — finishing on public API');
+      const cloud = await finishOAuthOnCloud(req);
+      if (cloud.ok) {
+        if (!cloud.email && userId) {
+          const newest = await EmailAccount.findOne({ userId, method: 'oauth' }).sort({ connectedAt: -1 });
+          if (newest?.email) cloud.email = newest.email;
+        }
+        rememberOAuth(userId, { status: 'ok', email: cloud.email, message: '' });
+        return redirectOAuthResult(res, { status: 'ok', email: cloud.email });
+      }
+      console.warn('[EMAIL] Cloud OAuth finish failed:', cloud.status, cloud.message);
+      return fail(
+        cloud.message || 'Google rejected the sign-in. Close this window and click Connect Gmail once more.',
+        userId
+      );
+    }
+
+    if (!userId) return fail('Invalid OAuth state');
+    const redirectUri = getOAuthRedirectUri();
+    const tokens = await exchangeGoogleCode(String(code), redirectUri);
     const profile = await fetchGoogleProfile(tokens.access_token);
     const email = String(profile.email).toLowerCase();
 
@@ -727,7 +867,7 @@ async function oauthCallback(req, res) {
       if (existing?.refreshTokenEnc) {
         payload.refreshTokenEnc = existing.refreshTokenEnc;
       } else {
-        return fail('Google did not return a refresh token. Remove app access and try again.');
+        return fail('Google did not return a refresh token. Remove app access and try again.', userId);
       }
     }
 
@@ -753,12 +893,18 @@ async function oauthCallback(req, res) {
       req
     });
 
+    rememberOAuth(userId, { status: 'ok', email: profile.email, message: '' });
     return redirectOAuthResult(res, {
       status: 'ok',
       email: profile.email
     });
   } catch (error) {
-    return fail(error.message || 'OAuth failed');
+    const raw = String(error.message || 'OAuth failed');
+    const msg = /^unauthorized$/i.test(raw)
+      ? 'Google rejected the sign-in. Close this window and click Connect Gmail once more.'
+      : raw;
+    console.warn('[EMAIL] OAuth callback failed:', raw);
+    return fail(msg, userId);
   }
 }
 
@@ -774,5 +920,6 @@ module.exports = {
   deleteTemplate,
   sendEmail,
   getOAuthUrl,
+  getOAuthResult,
   oauthCallback
 };

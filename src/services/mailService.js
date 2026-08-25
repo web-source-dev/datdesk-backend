@@ -478,17 +478,58 @@ function isGoogleOAuthConfigured() {
   return googleOAuthMissingKeys().length === 0;
 }
 
-function getOAuthRedirectUri() {
-  return (
-    readEnv('GOOGLE_OAUTH_REDIRECT_URI') ||
-    `${(readEnv('PUBLIC_API_URL') || 'http://localhost:7020').replace(/\/$/, '')}/email/oauth/callback`
-  );
+function isLoopbackHost(host) {
+  const h = String(host || '').split(':')[0].toLowerCase().replace(/^\[|\]$/g, '');
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1';
 }
 
-function buildGoogleAuthUrl(state) {
+function isLoopbackRedirect(raw) {
+  try {
+    const u = new URL(String(raw || ''));
+    return isLoopbackHost(u.hostname);
+  } catch {
+    return /localhost|127\.0\.0\.1/i.test(String(raw || ''));
+  }
+}
+
+function envOAuthRedirectUri() {
+  const explicit = readEnv('GOOGLE_OAUTH_REDIRECT_URI');
+  if (explicit && !isLoopbackRedirect(explicit)) {
+    return explicit.replace(/\/+$/, '');
+  }
+  const publicApi = readEnv('PUBLIC_API_URL');
+  if (publicApi && !isLoopbackRedirect(publicApi)) {
+    return `${publicApi.replace(/\/+$/, '')}/email/oauth/callback`;
+  }
+  return 'https://api.datdesk.apexskillzone.com/email/oauth/callback';
+}
+
+/**
+ * Public Google callback — same URL on every device.
+ * Never use localhost here; that only works on one machine.
+ */
+function getOAuthRedirectUri(_req) {
+  return envOAuthRedirectUri();
+}
+
+function googleErrorMessage(data, fallback) {
+  if (!data || typeof data !== 'object') return fallback;
+  if (typeof data.error_description === 'string' && data.error_description.trim()) {
+    return data.error_description.trim();
+  }
+  if (typeof data.error === 'string' && data.error.trim()) return data.error.trim();
+  if (data.error && typeof data.error === 'object') {
+    const nested = data.error.message || data.error.status || data.error.code;
+    if (nested) return String(nested);
+  }
+  if (typeof data.message === 'string' && data.message.trim()) return data.message.trim();
+  return fallback;
+}
+
+function buildGoogleAuthUrl(state, redirectUri) {
   const params = new URLSearchParams({
     client_id: readEnv('GOOGLE_CLIENT_ID'),
-    redirect_uri: getOAuthRedirectUri(),
+    redirect_uri: redirectUri || envOAuthRedirectUri(),
     response_type: 'code',
     scope: ['https://mail.google.com/', 'email', 'profile'].join(' '),
     access_type: 'offline',
@@ -498,12 +539,12 @@ function buildGoogleAuthUrl(state) {
   return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
 }
 
-async function exchangeGoogleCode(code) {
+async function exchangeGoogleCode(code, redirectUri) {
   const body = new URLSearchParams({
     code,
     client_id: readEnv('GOOGLE_CLIENT_ID'),
     client_secret: readEnv('GOOGLE_CLIENT_SECRET'),
-    redirect_uri: getOAuthRedirectUri(),
+    redirect_uri: redirectUri || envOAuthRedirectUri(),
     grant_type: 'authorization_code'
   });
   const res = await fetch('https://oauth2.googleapis.com/token', {
@@ -513,7 +554,13 @@ async function exchangeGoogleCode(code) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.access_token) {
-    throw new Error(data.error_description || data.error || 'OAuth token exchange failed');
+    const message = googleErrorMessage(data, 'OAuth token exchange failed');
+    console.warn('[EMAIL] Google token exchange failed', {
+      status: res.status,
+      error: data.error || data.message || message,
+      redirectUri
+    });
+    throw new Error(message);
   }
   return data;
 }
@@ -524,7 +571,7 @@ async function fetchGoogleProfile(accessToken) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.email) {
-    throw new Error('Failed to load Google profile');
+    throw new Error(googleErrorMessage(data, 'Failed to load Google profile'));
   }
   return data;
 }
