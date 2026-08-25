@@ -672,7 +672,7 @@ function oauthResultHtml({ ok, email, message }) {
     ? `<p class="email">${escapeHtml(email)}</p>`
     : '';
   const desc = ok
-    ? 'You can close this window and return to DAT. If Close does nothing, use the X on the window.'
+    ? 'You can close this window and return to DAT.'
     : escapeHtml(message || 'Google denied the request or the window was closed before approval.');
   const payload = JSON.stringify({
     type: 'DAT_EMAIL_OAUTH_DONE',
@@ -703,12 +703,6 @@ function oauthResultHtml({ ok, email, message }) {
     h1 { margin: 0 0 8px; font-size: 18px; }
     p { margin: 0 0 10px; color: #475569; font-size: 13px; line-height: 1.45; }
     .email { font-weight: 700; color: #0f172a; word-break: break-all; }
-    button {
-      margin-top: 12px; height: 36px; min-width: 120px; padding: 0 16px;
-      border: 0; border-radius: 4px; background: #0b6bcb; color: #fff;
-      font: 600 13px/1 "Segoe UI", system-ui, sans-serif; cursor: pointer;
-    }
-    .hint { display: none; margin-top: 8px; font-size: 12px; color: #64748b; }
   </style>
 </head>
 <body>
@@ -717,8 +711,6 @@ function oauthResultHtml({ ok, email, message }) {
       <h1>${escapeHtml(title)}</h1>
       ${emailLine}
       <p>${desc}</p>
-      <button type="button" id="close-btn">Close window</button>
-      <p class="hint" id="close-hint">Chrome blocks closing this window automatically. Click the X in the corner to close it.</p>
     </div>
   </div>
   <script>
@@ -732,22 +724,6 @@ function oauthResultHtml({ ok, email, message }) {
       try {
         localStorage.setItem('dat-email-oauth-result', JSON.stringify(Object.assign({}, payload, { at: Date.now() })));
       } catch (e) {}
-      var btn = document.getElementById('close-btn');
-      var hint = document.getElementById('close-hint');
-      function showHint() {
-        if (hint) hint.style.display = 'block';
-        if (btn) btn.textContent = 'Use the window X';
-      }
-      function tryClose() {
-        try { window.open('', '_self'); } catch (e) {}
-        try { window.close(); } catch (e) {}
-        try { window.top.close(); } catch (e) {}
-        setTimeout(function () {
-          if (!window.closed) showHint();
-        }, 150);
-      }
-      if (btn) btn.addEventListener('click', tryClose);
-      ${ok ? 'setTimeout(tryClose, 800);' : ''}
     })();
   </script>
 </body>
