@@ -30,6 +30,8 @@ const emailAccountSchema = new mongoose.Schema(
     smtpHost: { type: String, trim: true, default: '' },
     smtpPort: { type: Number, default: 587 },
     smtpSecure: { type: Boolean, default: false },
+    /** Login user if different from From address */
+    smtpUser: { type: String, trim: true, default: '' },
     isDefault: { type: Boolean, default: false },
     connectedAt: { type: Date, default: Date.now }
   },
@@ -47,6 +49,7 @@ emailAccountSchema.methods.toSafeJSON = function toSafeJSON() {
     smtpHost: this.method === 'smtp' ? this.smtpHost || '' : undefined,
     smtpPort: this.method === 'smtp' ? this.smtpPort : undefined,
     smtpSecure: this.method === 'smtp' ? Boolean(this.smtpSecure) : undefined,
+    smtpUser: this.method === 'smtp' ? this.smtpUser || '' : undefined,
     isDefault: Boolean(this.isDefault),
     connectedAt: this.connectedAt,
     connected: true

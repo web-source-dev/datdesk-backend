@@ -277,6 +277,7 @@ async function connectSmtp(req, res) {
       .toLowerCase();
     const password = String(req.body?.password || req.body?.appPassword || '').trim();
     const displayName = String(req.body?.displayName || '').trim();
+    const smtpUser = String(req.body?.smtpUser || req.body?.username || '').trim() || email;
     const makeDefault = req.body?.isDefault !== false;
 
     const normalized = normalizeSmtpSettings({
@@ -308,6 +309,7 @@ async function connectSmtp(req, res) {
       smtpHost: normalized.host,
       smtpPort: normalized.port,
       smtpSecure: normalized.secure,
+      smtpUser,
       connectedAt: new Date(),
       isDefault: false
     });
@@ -341,6 +343,7 @@ async function connectSmtp(req, res) {
       account.smtpHost = finalHost;
       account.smtpPort = finalPort;
       account.smtpSecure = finalSecure;
+      account.smtpUser = smtpUser;
       account.connectedAt = new Date();
       await account.save();
     } else {

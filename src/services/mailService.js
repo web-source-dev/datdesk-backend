@@ -110,13 +110,13 @@ function buildSmtpTransportOptions(account, overrides = {}) {
     // Force IPv4 — IPv6 SMTP hangs/timeouts are very common on Windows & cloud VMs
     family: 4,
     auth: {
-      user: String(overrides.user || account.email || '').trim(),
+      user: String(overrides.user || account.smtpUser || account.email || '').trim(),
       pass: password
     },
     // Keep per-attempt short so fallbacks don't stack into minutes
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 20_000,
+    connectionTimeout: 8_000,
+    greetingTimeout: 8_000,
+    socketTimeout: 15_000,
     tls: {
       rejectUnauthorized: false,
       minVersion: 'TLSv1.2',
@@ -130,6 +130,7 @@ function buildSmtpTransportOptions(account, overrides = {}) {
 }
 
 function smtpCandidateConfigs(account) {
+  const userHost = String(account.smtpHost || '').trim();
   const base = normalizeSmtpSettings({
     email: account.email,
     smtpHost: account.smtpHost,
@@ -146,10 +147,18 @@ function smtpCandidateConfigs(account) {
   };
 
   if (base.host) push(base.host, base.port, base.secure);
+
+  // User entered a host: try that first, then one TLS alternate. Do not wander
+  // across 2525 / other providers — that stacks timeouts into a minute-plus wait.
+  if (userHost && base.host) {
+    if (base.port === 465 || base.secure) push(base.host, 587, false);
+    else push(base.host, 465, true);
+    return candidates;
+  }
+
   if (base.host) {
     push(base.host, 587, false);
     push(base.host, 465, true);
-    push(base.host, 2525, false);
   }
 
   const preset = inferSmtpPreset(account.email);
@@ -171,10 +180,7 @@ function formatSmtpError(err, tried = []) {
 
   if (code === 'ETIMEDOUT' || code === 'ESOCKET' || /timeout/i.test(msg)) {
     const error = new Error(
-      'SMTP connection timed out. Your API server cannot reach the mail host (cloud hosts often block outbound ports 465/587). ' +
-        'Fix: In the extension Account tab set API server to http://localhost:7020 and run the backend locally, then connect again. ' +
-        'Or ask your host to allow outbound SMTP. For Gmail on a cloud API, use Connect with Google (OAuth) instead of SMTP.' +
-        triedLabel
+      'Could not reach the mail server. Check the host, port, and SSL setting, then try again. For Gmail, Connect Gmail is usually faster.'
     );
     error.code = 'SMTP_BLOCKED';
     return error;
@@ -316,7 +322,7 @@ async function verifySmtpWithFallbacks(account) {
         // ignore
       }
       const msg = String(err?.message || '');
-      if (/invalid login|authentication failed|535/i.test(msg) && tried.length >= 2) {
+      if (/invalid login|authentication failed|535|534|5\.7\.8|5\.7\.9/i.test(msg)) {
         break;
       }
     }
@@ -807,7 +813,7 @@ function resolveImapSettings(account) {
     host,
     port: Number(port) || 993,
     secure: secure !== false,
-    user: email,
+    user: String(account.smtpUser || email || '').trim(),
     pass: password
   };
 }
