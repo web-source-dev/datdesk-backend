@@ -275,7 +275,7 @@ async function connectSmtp(req, res) {
     const email = String(req.body?.email || '')
       .trim()
       .toLowerCase();
-    const password = String(req.body?.password || req.body?.appPassword || '').trim();
+    const password = String(req.body?.password || req.body?.appPassword || '').replace(/\s+/g, '');
     const displayName = String(req.body?.displayName || '').trim();
     const smtpUser = String(req.body?.smtpUser || req.body?.username || '').trim() || email;
     const makeDefault = req.body?.isDefault !== false;

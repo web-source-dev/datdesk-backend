@@ -114,9 +114,9 @@ function buildSmtpTransportOptions(account, overrides = {}) {
       pass: password
     },
     // Keep per-attempt short so fallbacks don't stack into minutes
-    connectionTimeout: 8_000,
-    greetingTimeout: 8_000,
-    socketTimeout: 15_000,
+    connectionTimeout: 20_000,
+    greetingTimeout: 20_000,
+    socketTimeout: 30_000,
     tls: {
       rejectUnauthorized: false,
       minVersion: 'TLSv1.2',
