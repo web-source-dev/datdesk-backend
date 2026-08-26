@@ -51,6 +51,25 @@ const emailSentSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
+    status: {
+      type: String,
+      enum: ['queued', 'sending', 'sent', 'failed'],
+      default: 'sent',
+      index: true
+    },
+    error: {
+      type: String,
+      default: '',
+      maxlength: 1000
+    },
+    queuedAt: {
+      type: Date,
+      default: null
+    },
+    sentAt: {
+      type: Date,
+      default: null
+    },
     vars: {
       type: mongoose.Schema.Types.Mixed,
       default: null
@@ -62,6 +81,7 @@ const emailSentSchema = new mongoose.Schema(
 emailSentSchema.index({ userId: 1, createdAt: -1 });
 emailSentSchema.index({ accountId: 1, createdAt: -1 });
 emailSentSchema.index({ from: 1, createdAt: -1 });
+emailSentSchema.index({ status: 1, createdAt: 1 });
 
 emailSentSchema.methods.toSafeJSON = function toSafeJSON() {
   return {
@@ -73,6 +93,10 @@ emailSentSchema.methods.toSafeJSON = function toSafeJSON() {
     body: this.body,
     method: this.method,
     messageId: this.messageId || '',
+    status: this.status || 'sent',
+    error: this.error || '',
+    queuedAt: this.queuedAt || null,
+    sentAt: this.sentAt || this.createdAt || null,
     templateId: this.templateId ? String(this.templateId) : null,
     accountId: this.accountId ? String(this.accountId) : null,
     vars: this.vars || null,

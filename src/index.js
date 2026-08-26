@@ -29,6 +29,7 @@ const {
   googleOAuthMissingKeys
 } = require('./services/mailService');
 const { startMailboxSyncCron } = require('./services/mailboxSyncService');
+const { resumeQueuedEmails } = require('./controllers/emailController');
 const { createCorsOptions, applyCorsHeaders } = require('./utils/corsOrigins');
 const { isTooLargeError, tooLargeMessage } = require('./utils/uploadLimits');
 
@@ -139,6 +140,9 @@ async function start() {
     } catch (err) {
       console.warn('[mailbox-sync] failed to start cron:', err?.message || err);
     }
+    resumeQueuedEmails().catch((err) => {
+      console.warn('[email] resume queued emails failed:', err?.message || err);
+    });
   });
 }
 

@@ -158,10 +158,12 @@ async function ensureDefaultAccount(userId, preferredId) {
 
 async function getStatus(req, res) {
   try {
-    const accounts = await listAccounts(req.user.userId);
-    const templates = await EmailTemplate.find({ userId: req.user.userId })
-      .sort({ isDefault: -1, updatedAt: -1 })
-      .lean();
+    const [accounts, templates] = await Promise.all([
+      listAccounts(req.user.userId),
+      EmailTemplate.find({ userId: req.user.userId })
+        .sort({ isDefault: -1, updatedAt: -1 })
+        .lean()
+    ]);
     const defaultAccount = accounts.find((a) => a.isDefault) || accounts[0] || null;
 
     return res.json({
@@ -535,26 +537,140 @@ async function deleteTemplate(req, res) {
   }
 }
 
+async function findSendingAccount(userId, accountId) {
+  if (accountId) {
+    return EmailAccount.findOne({
+      _id: accountId,
+      userId
+    }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+  }
+  const preferred = await EmailAccount.findOne({
+    userId,
+    isDefault: true
+  }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+  if (preferred) return preferred;
+  return EmailAccount.findOne({ userId }).select(
+    '+appPasswordEnc +refreshTokenEnc +accessTokenEnc'
+  );
+}
+
+async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent = '' }) {
+  const sent = await EmailSent.findOneAndUpdate(
+    { _id: sentId, status: { $in: ['queued', 'sending'] } },
+    { $set: { status: 'sending' } },
+    { new: true }
+  );
+  if (!sent) return null;
+
+  const account = await EmailAccount.findOne({
+    _id: sent.accountId,
+    userId: sent.userId
+  }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+
+  if (!account) {
+    sent.status = 'failed';
+    sent.error = 'Inbox no longer connected';
+    await sent.save();
+    await logActivity({
+      userId: sent.userId,
+      actorEmail,
+      action: 'email.send',
+      category: 'email',
+      status: 'failure',
+      message: `Failed to send email to ${sent.to}`,
+      meta: { to: sent.to, subject: sent.subject, emailSentId: String(sent._id) },
+      ip,
+      userAgent
+    });
+    return sent;
+  }
+
+  try {
+    const result = await sendMail({
+      account,
+      to: sent.to,
+      subject: sent.subject,
+      body: sent.body
+    });
+    sent.status = 'sent';
+    sent.error = '';
+    sent.messageId = result?.messageId || result?.id || '';
+    sent.sentAt = new Date();
+    sent.method = account.method || sent.method || 'unknown';
+    await sent.save();
+    await logActivity({
+      userId: sent.userId,
+      actorEmail,
+      action: 'email.send',
+      category: 'email',
+      status: 'success',
+      message: `Sent email to ${sent.to}`,
+      meta: {
+        accountId: String(account._id),
+        from: account.email,
+        to: sent.to,
+        subject: sent.subject,
+        method: account.method,
+        emailSentId: String(sent._id),
+        messageId: sent.messageId,
+        queued: true
+      },
+      ip,
+      userAgent
+    });
+  } catch (error) {
+    sent.status = 'failed';
+    sent.error = String(error.message || 'Failed to send email').slice(0, 1000);
+    await sent.save();
+    await logActivity({
+      userId: sent.userId,
+      actorEmail,
+      action: 'email.send',
+      category: 'email',
+      status: 'failure',
+      message: error.message || 'Failed to send email',
+      meta: {
+        to: sent.to,
+        subject: sent.subject,
+        emailSentId: String(sent._id)
+      },
+      ip,
+      userAgent
+    });
+  }
+  return sent;
+}
+
+async function resumeQueuedEmails() {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000);
+  try {
+    await EmailSent.updateMany(
+      { status: 'queued', createdAt: { $lt: cutoff } },
+      { $set: { status: 'failed', error: 'Send timed out in queue' } }
+    );
+    const pending = await EmailSent.find({
+      status: { $in: ['queued', 'sending'] },
+      createdAt: { $gte: cutoff }
+    })
+      .sort({ createdAt: 1 })
+      .limit(50)
+      .select('_id');
+    for (const doc of pending) {
+      deliverQueuedEmail({ sentId: doc._id }).catch((err) => {
+        console.warn('[email] resume queued send failed:', err?.message || err);
+      });
+    }
+    if (pending.length) {
+      console.log(`[email] resumed ${pending.length} queued send(s)`);
+    }
+  } catch (err) {
+    console.warn('[email] resume queued emails skipped:', err?.message || err);
+  }
+}
+
 async function sendEmail(req, res) {
   try {
-    const accountId = req.body?.accountId;
-    let account = null;
-    if (accountId) {
-      account = await EmailAccount.findOne({
-        _id: accountId,
-        userId: req.user.userId
-      }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
-    } else {
-      account = await EmailAccount.findOne({
-        userId: req.user.userId,
-        isDefault: true
-      }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
-      if (!account) {
-        account = await EmailAccount.findOne({ userId: req.user.userId }).select(
-          '+appPasswordEnc +refreshTokenEnc +accessTokenEnc'
-        );
-      }
-    }
+    const account = await findSendingAccount(req.user.userId, req.body?.accountId);
 
     if (!account) {
       return res.status(400).json({ message: 'Connect an email account first' });
@@ -581,7 +697,7 @@ async function sendEmail(req, res) {
       const template = await EmailTemplate.findOne({
         _id: templateId,
         userId: req.user.userId
-      });
+      }).lean();
       if (!template) return res.status(404).json({ message: 'Template not found' });
       if (!subject) subject = applyTemplate(template.subject, vars);
       if (!body.trim()) body = applyTemplate(template.body, vars);
@@ -598,47 +714,40 @@ async function sendEmail(req, res) {
       return res.status(400).json({ message: 'Subject and body are required' });
     }
 
-    const result = await sendMail({ account, to, subject, body });
-
-    let sentId = null;
-    try {
-      const sent = await EmailSent.create({
-        userId: req.user.userId,
-        accountId: account._id,
-        templateId: templateId || null,
-        from: account.email,
-        to,
-        subject,
-        body,
-        method: account.method || 'unknown',
-        messageId: result?.messageId || result?.id || '',
-        vars
-      });
-      sentId = String(sent._id);
-    } catch (logErr) {
-      console.warn('[email] failed to log sent email:', logErr?.message || logErr);
-    }
-
-    await logActivity({
+    const queued = await EmailSent.create({
       userId: req.user.userId,
-      actorEmail: req.user.email,
-      action: 'email.send',
-      category: 'email',
-      status: 'success',
-      message: `Sent email to ${to}`,
-      meta: {
-        accountId: String(account._id),
-        from: account.email,
-        to,
-        subject,
-        method: account.method,
-        emailSentId: sentId,
-        messageId: result?.messageId || result?.id || ''
-      },
-      req
+      accountId: account._id,
+      templateId: templateId || null,
+      from: account.email,
+      to,
+      subject,
+      body,
+      method: account.method || 'unknown',
+      messageId: '',
+      vars,
+      status: 'queued',
+      queuedAt: new Date()
     });
 
-    return res.json({ message: 'Email sent', from: account.email, ...result });
+    const job = {
+      sentId: queued._id,
+      actorEmail: req.user.email,
+      ip: req.ip,
+      userAgent: req.get('user-agent') || ''
+    };
+    setImmediate(() => {
+      deliverQueuedEmail(job).catch((err) => {
+        console.warn('[email] background send failed:', err?.message || err);
+      });
+    });
+
+    return res.json({
+      message: 'Sending',
+      queued: true,
+      id: String(queued._id),
+      from: account.email,
+      to
+    });
   } catch (error) {
     await logActivity({
       userId: req.user?.userId,
@@ -888,6 +997,7 @@ module.exports = {
   updateTemplate,
   deleteTemplate,
   sendEmail,
+  resumeQueuedEmails,
   getOAuthUrl,
   getOAuthResult,
   oauthCallback
