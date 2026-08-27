@@ -14,7 +14,10 @@ const {
   exchangeGoogleCode,
   fetchGoogleProfile,
   getOAuthRedirectUri,
-  normalizeSmtpSettings
+  normalizeSmtpSettings,
+  isGmailSmtpHost,
+  isGmailAddress,
+  isSmtpOutboundBlocked
 } = require('../services/mailService');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -307,8 +310,17 @@ async function connectSmtp(req, res) {
       port: normalized.port,
       secure: normalized.secure,
       passLen: password.length,
-      userId: String(req.user?.userId || '')
+      userId: String(req.user?.userId || ''),
+      outboundBlocked: isSmtpOutboundBlocked()
     });
+
+    if (isSmtpOutboundBlocked() && (isGmailSmtpHost(normalized.host) || isGmailAddress(email))) {
+      console.warn('[SMTP] skip handshake — Gmail SMTP is blocked here; use OAuth');
+      return res.status(400).json({
+        code: 'GMAIL_USE_OAUTH',
+        message: 'Gmail SMTP is blocked on this server. Use Connect Gmail.'
+      });
+    }
 
     const draft = new EmailAccount({
       userId: req.user.userId,

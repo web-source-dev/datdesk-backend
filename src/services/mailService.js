@@ -55,6 +55,27 @@ function isGmailSmtpHost(host) {
   return h === 'smtp.gmail.com' || h === 'smtp.googlemail.com' || h === 'smtp-relay.gmail.com';
 }
 
+function isGmailAddress(email) {
+  const domain = String(email || '')
+    .split('@')[1]
+    ?.toLowerCase()
+    .trim();
+  return domain === 'gmail.com' || domain === 'googlemail.com';
+}
+
+/** Render and most PaaS hosts block outbound 25/465/587. */
+function isSmtpOutboundBlocked() {
+  if (/^(1|true|yes)$/i.test(String(process.env.SMTP_OUTBOUND_BLOCKED || ''))) return true;
+  if (process.env.RENDER || process.env.RENDER_SERVICE_ID) return true;
+  return false;
+}
+
+function gmailMustUseOauthError() {
+  const error = new Error('Gmail SMTP is blocked on this server. Use Connect Gmail.');
+  error.code = 'GMAIL_USE_OAUTH';
+  return error;
+}
+
 /**
  * Normalize host/port/secure so STARTTLS (587) and SSL (465) are not mixed up.
  * Wrong secure+port combos are the #1 cause of SMTP "connection timeout".
@@ -334,6 +355,21 @@ async function verifyOneSmtp(account, candidate, extra = {}) {
 }
 
 async function verifySmtpWithFallbacks(account) {
+  if (isSmtpOutboundBlocked()) {
+    smtpLog(
+      'outbound SMTP blocked on this host',
+      process.env.RENDER || process.env.RENDER_SERVICE_ID ? 'render' : 'SMTP_OUTBOUND_BLOCKED'
+    );
+    if (isGmailSmtpHost(account.smtpHost) || isGmailAddress(account.email)) {
+      throw gmailMustUseOauthError();
+    }
+    const error = new Error(
+      'This server cannot open outbound SMTP (ports 465/587 are blocked). Use a mail API over HTTPS, or Connect Gmail.'
+    );
+    error.code = 'SMTP_BLOCKED';
+    throw error;
+  }
+
   const candidates = smtpCandidateConfigs(account);
   smtpLog(
     'candidates',
@@ -1160,6 +1196,8 @@ module.exports = {
   normalizeSmtpSettings,
   inferSmtpPreset,
   isGmailSmtpHost,
+  isGmailAddress,
+  isSmtpOutboundBlocked,
   SMTP_PRESETS,
   listGmailMessageIds,
   getGmailMessage,
