@@ -1,5 +1,34 @@
 const User = require('../models/User');
+const jwt = require('jsonwebtoken');
 const { verifyToken } = require('../utils/jwt');
+
+const PUBLIC_API = String(process.env.PUBLIC_API_URL || 'https://api.datdesk.apexskillzone.com').replace(
+  /\/+$/,
+  ''
+);
+
+async function payloadFromPublicApi(token) {
+  const authHeader = String(token || '').trim();
+  if (!authHeader) return null;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 8000);
+  try {
+    const res = await fetch(`${PUBLIC_API}/email/status`, {
+      method: 'GET',
+      headers: { Authorization: authHeader, Accept: 'application/json' },
+      signal: ctrl.signal
+    });
+    if (!res.ok) return null;
+    const raw = authHeader.replace(/^Bearer\s+/i, '');
+    const decoded = jwt.decode(raw);
+    if (!decoded || !decoded.userId) return null;
+    return decoded;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 async function authenticateToken(req, res, next) {
   try {
@@ -13,12 +42,15 @@ async function authenticateToken(req, res, next) {
 
     let payload;
     try {
-      payload = verifyToken(token);
+      payload = verifyToken(String(token).replace(/^Bearer\s+/i, ''));
     } catch {
-      return res.status(401).json({
-        message: 'Please sign in again.',
-        code: 'INVALID_TOKEN'
-      });
+      payload = await payloadFromPublicApi(token);
+      if (!payload) {
+        return res.status(401).json({
+          message: 'Please sign in again.',
+          code: 'INVALID_TOKEN'
+        });
+      }
     }
 
     const user = await User.findById(payload.userId).select(

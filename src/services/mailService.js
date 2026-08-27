@@ -11,14 +11,14 @@ try {
 
 const GMAIL_SMTP = {
   host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,
+  port: 587,
+  secure: false,
   family: 4
 };
 
 const SMTP_PRESETS = {
-  'gmail.com': { host: 'smtp.gmail.com', port: 465, secure: true },
-  'googlemail.com': { host: 'smtp.gmail.com', port: 465, secure: true },
+  'gmail.com': { host: 'smtp.gmail.com', port: 587, secure: false },
+  'googlemail.com': { host: 'smtp.gmail.com', port: 587, secure: false },
   'outlook.com': { host: 'smtp.office365.com', port: 587, secure: false },
   'hotmail.com': { host: 'smtp.office365.com', port: 587, secure: false },
   'live.com': { host: 'smtp.office365.com', port: 587, secure: false },
@@ -48,6 +48,13 @@ function inferSmtpPreset(email) {
   return SMTP_PRESETS[domain] || null;
 }
 
+function isGmailSmtpHost(host) {
+  const h = String(host || '')
+    .toLowerCase()
+    .trim();
+  return h === 'smtp.gmail.com' || h === 'smtp.googlemail.com' || h === 'smtp-relay.gmail.com';
+}
+
 /**
  * Normalize host/port/secure so STARTTLS (587) and SSL (465) are not mixed up.
  * Wrong secure+port combos are the #1 cause of SMTP "connection timeout".
@@ -65,15 +72,10 @@ function normalizeSmtpSettings({ email, smtpHost, smtpPort, smtpSecure }) {
   }
 
   const hostLower = host.toLowerCase();
-  if (hostLower === 'smtp.gmail.com' || hostLower === 'smtp.mail.yahoo.com') {
-    if (!port || port === 587 || port === 465) {
-      if (secure === true || port === 465 || !port) {
-        port = port || 465;
-        secure = true;
-      } else {
-        port = 587;
-        secure = false;
-      }
+  if (hostLower === 'smtp.gmail.com' || hostLower === 'smtp.googlemail.com' || hostLower === 'smtp.mail.yahoo.com') {
+    if (!port) {
+      port = 587;
+      secure = false;
     }
   }
   if (hostLower === 'smtp.office365.com' || hostLower === 'smtp-mail.outlook.com') {
@@ -180,7 +182,7 @@ function formatSmtpError(err, tried = []) {
 
   if (code === 'ETIMEDOUT' || code === 'ESOCKET' || /timeout/i.test(msg)) {
     const error = new Error(
-      'Could not reach the mail server. Check the host, port, and SSL setting, then try again. For Gmail, Connect Gmail is usually faster.'
+      'This API cannot reach that mail server (outbound SMTP is blocked). For Gmail, use Connect Gmail.'
     );
     error.code = 'SMTP_BLOCKED';
     return error;
@@ -1124,6 +1126,7 @@ module.exports = {
   getOAuthRedirectUri,
   normalizeSmtpSettings,
   inferSmtpPreset,
+  isGmailSmtpHost,
   SMTP_PRESETS,
   listGmailMessageIds,
   getGmailMessage,
