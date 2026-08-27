@@ -2,7 +2,7 @@ const jwt = require('jsonwebtoken');
 const EmailAccount = require('../models/EmailAccount');
 const EmailTemplate = require('../models/EmailTemplate');
 const EmailSent = require('../models/EmailSent');
-const { encryptSecret } = require('../utils/secretCrypto');
+const { encryptSecret, decryptSecret } = require('../utils/secretCrypto');
 const { logActivity } = require('../services/activityLogService');
 const {
   applyTemplate,
@@ -15,9 +15,7 @@ const {
   fetchGoogleProfile,
   getOAuthRedirectUri,
   normalizeSmtpSettings,
-  isGmailSmtpHost,
-  isGmailAddress,
-  isSmtpOutboundBlocked
+  probeSmtpTcp
 } = require('../services/mailService');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -311,16 +309,8 @@ async function connectSmtp(req, res) {
       secure: normalized.secure,
       passLen: password.length,
       userId: String(req.user?.userId || ''),
-      outboundBlocked: isSmtpOutboundBlocked()
+      skipVerify: Boolean(req.body?.skipVerify || req.body?.clientVerified)
     });
-
-    if (isSmtpOutboundBlocked() && (isGmailSmtpHost(normalized.host) || isGmailAddress(email))) {
-      console.warn('[SMTP] skip handshake — Gmail SMTP is blocked here; use OAuth');
-      return res.status(400).json({
-        code: 'GMAIL_USE_OAUTH',
-        message: 'Gmail SMTP is blocked on this server. Use Connect Gmail.'
-      });
-    }
 
     const draft = new EmailAccount({
       userId: req.user.userId,
@@ -336,27 +326,37 @@ async function connectSmtp(req, res) {
       isDefault: false
     });
 
+    const skipVerify = Boolean(req.body?.skipVerify || req.body?.clientVerified);
     let working;
-    try {
-      working = await verifyAccountCredentials(draft);
-      console.log('[SMTP] connect verified', {
-        email,
-        host: working?.host || normalized.host,
-        port: working?.port || normalized.port,
-        secure: working?.secure != null ? working.secure : normalized.secure
-      });
-    } catch (err) {
-      console.warn('[SMTP] connect verify failed', {
-        email,
+    if (skipVerify) {
+      console.log('[SMTP] skipping server verify — client already verified from this PC');
+      working = {
         host: normalized.host,
         port: normalized.port,
-        code: err.code || '',
-        message: err.message || String(err)
-      });
-      return res.status(400).json({
-        message: err.message || 'Could not verify SMTP credentials. Check host, port, and password.',
-        code: err.code || 'SMTP_VERIFY_FAILED'
-      });
+        secure: normalized.secure
+      };
+    } else {
+      try {
+        working = await verifyAccountCredentials(draft);
+        console.log('[SMTP] connect verified', {
+          email,
+          host: working?.host || normalized.host,
+          port: working?.port || normalized.port,
+          secure: working?.secure != null ? working.secure : normalized.secure
+        });
+      } catch (err) {
+        console.warn('[SMTP] connect verify failed', {
+          email,
+          host: normalized.host,
+          port: normalized.port,
+          code: err.code || '',
+          message: err.message || String(err)
+        });
+        return res.status(400).json({
+          message: err.message || 'Could not verify SMTP credentials. Check host, port, and password.',
+          code: err.code || 'SMTP_VERIFY_FAILED'
+        });
+      }
     }
 
     const finalHost = working?.host || normalized.host;
@@ -769,6 +769,35 @@ async function sendEmail(req, res) {
       queuedAt: new Date()
     });
 
+    const smtpish = account.method === 'smtp' || account.method === 'app_password';
+    if (smtpish) {
+      const host = account.smtpHost || 'smtp.gmail.com';
+      const port = Number(account.smtpPort) || 587;
+      const reachable = await probeSmtpTcp(host, port, 2500);
+      console.log('[SMTP] send tcp probe', `${host}:${port}`, reachable ? 'open' : 'blocked');
+      if (!reachable) {
+        return res.json({
+          message: 'Send from this PC',
+          queued: false,
+          via: 'client-smtp',
+          id: String(queued._id),
+          clientSmtp: {
+            host,
+            port,
+            secure: Boolean(account.smtpSecure) || port === 465,
+            user: account.smtpUser || account.email,
+            pass: decryptSecret(account.appPasswordEnc),
+            from: account.displayName
+              ? `"${String(account.displayName).replace(/"/g, '')}" <${account.email}>`
+              : account.email,
+            to,
+            subject,
+            body
+          }
+        });
+      }
+    }
+
     const job = {
       sentId: queued._id,
       actorEmail: req.user.email,
@@ -1026,6 +1055,27 @@ async function oauthCallback(req, res) {
   }
 }
 
+async function ackClientSend(req, res) {
+  try {
+    const sent = await EmailSent.findOne({
+      _id: req.body?.id,
+      userId: req.user.userId
+    });
+    if (!sent) return res.status(404).json({ message: 'Send record not found' });
+    const ok = req.body?.ok !== false;
+    sent.status = ok ? 'sent' : 'failed';
+    sent.error = ok ? '' : String(req.body?.message || 'Desktop SMTP send failed');
+    if (ok) {
+      sent.sentAt = new Date();
+      sent.messageId = String(req.body?.messageId || sent.messageId || '');
+    }
+    await sent.save();
+    return res.json({ ok: true, status: sent.status });
+  } catch (error) {
+    return res.status(500).json({ message: error.message || 'Failed to update send' });
+  }
+}
+
 module.exports = {
   getStatus,
   connectAppPassword,
@@ -1037,6 +1087,7 @@ module.exports = {
   updateTemplate,
   deleteTemplate,
   sendEmail,
+  ackClientSend,
   resumeQueuedEmails,
   getOAuthUrl,
   getOAuthResult,

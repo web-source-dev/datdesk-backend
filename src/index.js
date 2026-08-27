@@ -26,8 +26,7 @@ const {
 const {
   isGoogleOAuthConfigured,
   getOAuthRedirectUri,
-  googleOAuthMissingKeys,
-  isSmtpOutboundBlocked
+  googleOAuthMissingKeys
 } = require('./services/mailService');
 const { startMailboxSyncCron } = require('./services/mailboxSyncService');
 const { resumeQueuedEmails } = require('./controllers/emailController');
@@ -79,7 +78,7 @@ app.get('/health', (_req, res) => {
     port: Number(process.env.PORT) || 7020,
     oauthConfigured,
     oauthMissing: oauthConfigured ? [] : googleOAuthMissingKeys(),
-    smtpOutboundBlocked: isSmtpOutboundBlocked(),
+    oauthRedirectUri: getOAuthRedirectUri(),
     mailboxSync: mailboxSync
       ? {
           enabled: mailboxSync.enabled,

@@ -1,5 +1,6 @@
 const nodemailer = require('nodemailer');
 const dns = require('dns');
+const net = require('net');
 const { decryptSecret, encryptSecret } = require('../utils/secretCrypto');
 
 // Windows / some VPS resolve IPv6 first and hang forever on SMTP.
@@ -53,27 +54,6 @@ function isGmailSmtpHost(host) {
     .toLowerCase()
     .trim();
   return h === 'smtp.gmail.com' || h === 'smtp.googlemail.com' || h === 'smtp-relay.gmail.com';
-}
-
-function isGmailAddress(email) {
-  const domain = String(email || '')
-    .split('@')[1]
-    ?.toLowerCase()
-    .trim();
-  return domain === 'gmail.com' || domain === 'googlemail.com';
-}
-
-/** Render and most PaaS hosts block outbound 25/465/587. */
-function isSmtpOutboundBlocked() {
-  if (/^(1|true|yes)$/i.test(String(process.env.SMTP_OUTBOUND_BLOCKED || ''))) return true;
-  if (process.env.RENDER || process.env.RENDER_SERVICE_ID) return true;
-  return false;
-}
-
-function gmailMustUseOauthError() {
-  const error = new Error('Gmail SMTP is blocked on this server. Use Connect Gmail.');
-  error.code = 'GMAIL_USE_OAUTH';
-  return error;
 }
 
 /**
@@ -354,47 +334,60 @@ async function verifyOneSmtp(account, candidate, extra = {}) {
   }
 }
 
-async function verifySmtpWithFallbacks(account) {
-  if (isSmtpOutboundBlocked()) {
-    smtpLog(
-      'outbound SMTP blocked on this host',
-      process.env.RENDER || process.env.RENDER_SERVICE_ID ? 'render' : 'SMTP_OUTBOUND_BLOCKED'
-    );
-    if (isGmailSmtpHost(account.smtpHost) || isGmailAddress(account.email)) {
-      throw gmailMustUseOauthError();
-    }
-    const error = new Error(
-      'This server cannot open outbound SMTP (ports 465/587 are blocked). Use a mail API over HTTPS, or Connect Gmail.'
-    );
-    error.code = 'SMTP_BLOCKED';
-    throw error;
-  }
+function probeSmtpTcp(host, port, ms = 2500) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port: Number(port), family: 4 });
+    const timer = setTimeout(() => {
+      socket.destroy();
+      resolve(false);
+    }, ms);
+    socket.once('connect', () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(true);
+    });
+    socket.once('error', () => {
+      clearTimeout(timer);
+      resolve(false);
+    });
+  });
+}
 
+async function verifySmtpWithFallbacks(account) {
   const candidates = smtpCandidateConfigs(account);
   smtpLog(
     'candidates',
     candidates.map((c) => `${c.host}:${c.port}${c.secure ? '/SSL' : '/STARTTLS'}`).join(', ') || '(none)'
   );
+
+  const reachable = [];
+  for (const candidate of candidates) {
+    const open = await probeSmtpTcp(candidate.host, candidate.port, 2500);
+    smtpLog('tcp probe', `${candidate.host}:${candidate.port}`, open ? 'open' : 'blocked');
+    if (open) reachable.push(candidate);
+  }
+
+  if (!reachable.length) {
+    const err = new Error(
+      'The API host (Render) blocks outbound SMTP ports 465/587. Signal will verify from this PC instead.'
+    );
+    err.code = 'SMTP_EGRESS_BLOCKED';
+    smtpLog('egress blocked — no SMTP ports reachable');
+    throw err;
+  }
+
   const tried = [];
   let lastErr = null;
 
-  for (const candidate of candidates) {
+  for (const candidate of reachable) {
     tried.push(candidate);
     try {
       return await verifyOneSmtp(account, candidate);
     } catch (err) {
       lastErr = err;
       const msg = String(err?.message || '');
-      const timedOut = err?.code === 'ETIMEDOUT' || err?.code === 'ESOCKET' || /timeout/i.test(msg);
       if (/invalid login|authentication failed|535|534|5\.7\.8|5\.7\.9/i.test(msg)) {
         break;
-      }
-      if (timedOut) {
-        try {
-          return await verifyOneSmtp(account, candidate, { family: 4 });
-        } catch (err2) {
-          lastErr = err2;
-        }
       }
     }
   }
@@ -1196,8 +1189,6 @@ module.exports = {
   normalizeSmtpSettings,
   inferSmtpPreset,
   isGmailSmtpHost,
-  isGmailAddress,
-  isSmtpOutboundBlocked,
   SMTP_PRESETS,
   listGmailMessageIds,
   getGmailMessage,
@@ -1206,5 +1197,6 @@ module.exports = {
   fetchMailboxMessagesBatch,
   canFetchLifetimeForAccount,
   resolveImapSettings,
-  getOAuthAccessToken
+  getOAuthAccessToken,
+  probeSmtpTcp
 };

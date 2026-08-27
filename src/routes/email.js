@@ -10,6 +10,7 @@ const {
   updateTemplate,
   deleteTemplate,
   sendEmail,
+  ackClientSend,
   getOAuthUrl,
   getOAuthResult,
   oauthCallback
@@ -34,5 +35,6 @@ router.put('/templates/:id', authenticateToken, updateTemplate);
 router.delete('/templates/:id', authenticateToken, deleteTemplate);
 
 router.post('/send', authenticateToken, sendEmail);
+router.post('/send/ack', authenticateToken, ackClientSend);
 
 module.exports = router;
