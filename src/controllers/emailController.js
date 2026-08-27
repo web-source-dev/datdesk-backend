@@ -300,6 +300,16 @@ async function connectSmtp(req, res) {
       });
     }
 
+    console.log('[SMTP] connect request', {
+      email,
+      smtpUser,
+      host: normalized.host,
+      port: normalized.port,
+      secure: normalized.secure,
+      passLen: password.length,
+      userId: String(req.user?.userId || '')
+    });
+
     const draft = new EmailAccount({
       userId: req.user.userId,
       email,
@@ -317,7 +327,20 @@ async function connectSmtp(req, res) {
     let working;
     try {
       working = await verifyAccountCredentials(draft);
+      console.log('[SMTP] connect verified', {
+        email,
+        host: working?.host || normalized.host,
+        port: working?.port || normalized.port,
+        secure: working?.secure != null ? working.secure : normalized.secure
+      });
     } catch (err) {
+      console.warn('[SMTP] connect verify failed', {
+        email,
+        host: normalized.host,
+        port: normalized.port,
+        code: err.code || '',
+        message: err.message || String(err)
+      });
       return res.status(400).json({
         message: err.message || 'Could not verify SMTP credentials. Check host, port, and password.',
         code: err.code || 'SMTP_VERIFY_FAILED'
@@ -346,12 +369,14 @@ async function connectSmtp(req, res) {
       account.smtpUser = smtpUser;
       account.connectedAt = new Date();
       await account.save();
+      console.log('[SMTP] connect saved existing', { email, host: finalHost, port: finalPort, secure: finalSecure });
     } else {
       draft.smtpHost = finalHost;
       draft.smtpPort = finalPort;
       draft.smtpSecure = finalSecure;
       await draft.save();
       account = draft;
+      console.log('[SMTP] connect saved new', { email, host: finalHost, port: finalPort, secure: finalSecure });
     }
 
     if (makeDefault || !(await EmailAccount.exists({ userId: req.user.userId, isDefault: true }))) {

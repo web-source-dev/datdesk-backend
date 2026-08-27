@@ -92,6 +92,10 @@ function normalizeSmtpSettings({ email, smtpHost, smtpPort, smtpSecure }) {
   return { host, port: Number(port), secure: Boolean(secure) };
 }
 
+function smtpLog(...args) {
+  console.log('[SMTP]', ...args);
+}
+
 function buildSmtpTransportOptions(account, overrides = {}) {
   const password = decryptSecret(account.appPasswordEnc);
   if (!password) throw new Error('Email account is missing credentials');
@@ -105,30 +109,21 @@ function buildSmtpTransportOptions(account, overrides = {}) {
 
   if (!normalized.host) throw new Error('SMTP host is required');
 
+  const user = String(overrides.user || account.smtpUser || account.email || '').trim();
+  // Match CargoSignal / Loadline / the working local test script.
+  // Extra TLS/requireTLS/minVersion options break many company mail servers.
   const opts = {
     host: normalized.host,
     port: normalized.port,
     secure: normalized.secure,
-    // Force IPv4 — IPv6 SMTP hangs/timeouts are very common on Windows & cloud VMs
-    family: 4,
-    auth: {
-      user: String(overrides.user || account.smtpUser || account.email || '').trim(),
-      pass: password
-    },
-    // Keep per-attempt short so fallbacks don't stack into minutes
-    connectionTimeout: 20_000,
-    greetingTimeout: 20_000,
-    socketTimeout: 30_000,
-    tls: {
-      rejectUnauthorized: false,
-      minVersion: 'TLSv1.2',
-      servername: normalized.host
-    },
-    requireTLS: !normalized.secure && (normalized.port === 587 || normalized.port === 25),
-    ignoreTLS: false
+    auth: { user, pass: password },
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 20_000
   };
+  if (overrides.family) opts.family = overrides.family;
 
-  return { opts, normalized };
+  return { opts, normalized, user, passLen: password.length };
 }
 
 function smtpCandidateConfigs(account) {
@@ -180,27 +175,35 @@ function formatSmtpError(err, tried = []) {
     ? ` Tried: ${tried.map((t) => `${t.host}:${t.port}${t.secure ? '/SSL' : '/STARTTLS'}`).join(', ')}.`
     : '';
 
+  smtpLog('format error', { code, msg, tried });
+
   if (code === 'ETIMEDOUT' || code === 'ESOCKET' || /timeout/i.test(msg)) {
-    const error = new Error(
-      'This API cannot reach that mail server (outbound SMTP is blocked). For Gmail, use Connect Gmail.'
-    );
-    error.code = 'SMTP_BLOCKED';
+    const error = new Error(`SMTP connection timed out.${triedLabel} Check host, port, and SSL.`);
+    error.code = 'SMTP_TIMEOUT';
     return error;
   }
   if (code === 'ECONNREFUSED') {
-    return new Error(
+    const error = new Error(
       `SMTP connection refused.${triedLabel} Wrong host/port, or the mail server is blocking this IP.`
     );
+    error.code = 'SMTP_REFUSED';
+    return error;
   }
   if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') {
-    return new Error(`SMTP host not found. Check the SMTP host name.${triedLabel}`);
+    const error = new Error(`SMTP host not found. Check the SMTP host name.${triedLabel}`);
+    error.code = 'SMTP_HOST';
+    return error;
   }
   if (/invalid login|authentication|credentials|535|534|535-5\.7/i.test(msg)) {
-    return new Error(
-      `SMTP login failed: ${msg}. For Gmail/Yahoo use an App Password, not your normal password.`
+    const error = new Error(
+      'SMTP login failed. For Gmail/Yahoo use an App Password, not your normal password.'
     );
+    error.code = 'SMTP_AUTH';
+    return error;
   }
-  return new Error(`${msg}${triedLabel}`);
+  const error = new Error(`${msg}${triedLabel}`);
+  error.code = code || 'SMTP_VERIFY_FAILED';
+  return error;
 }
 
 async function createAppPasswordTransport(account) {
@@ -212,10 +215,9 @@ async function createAppPasswordTransport(account) {
       user: account.email,
       pass: password
     },
-    connectionTimeout: 10_000,
-    greetingTimeout: 10_000,
-    socketTimeout: 20_000,
-    tls: { rejectUnauthorized: false, servername: 'smtp.gmail.com' }
+    connectionTimeout: 15_000,
+    greetingTimeout: 15_000,
+    socketTimeout: 20_000
   });
 }
 
@@ -298,34 +300,65 @@ async function getTransportForAccount(account) {
  * Verify SMTP by trying several common TLS/port combinations.
  * Returns the working { host, port, secure } so callers can persist corrections.
  */
+async function verifyOneSmtp(account, candidate, extra = {}) {
+  const { opts, normalized, user, passLen } = buildSmtpTransportOptions(account, {
+    ...candidate,
+    ...extra
+  });
+  const label = `${opts.host}:${opts.port}${opts.secure ? '/SSL' : '/STARTTLS'} user=${user} passLen=${passLen}${
+    extra.family ? ' ipv4' : ''
+  }`;
+  smtpLog('verify try', label);
+  const transport = nodemailer.createTransport(opts);
+  const started = Date.now();
+  try {
+    await transport.verify();
+    smtpLog('verify ok', label, `${Date.now() - started}ms`);
+    return normalized;
+  } catch (err) {
+    smtpLog(
+      'verify fail',
+      label,
+      `${Date.now() - started}ms`,
+      'code=' + (err?.code || '-'),
+      err?.message || err
+    );
+    throw err;
+  } finally {
+    try {
+      transport.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function verifySmtpWithFallbacks(account) {
   const candidates = smtpCandidateConfigs(account);
+  smtpLog(
+    'candidates',
+    candidates.map((c) => `${c.host}:${c.port}${c.secure ? '/SSL' : '/STARTTLS'}`).join(', ') || '(none)'
+  );
   const tried = [];
   let lastErr = null;
 
   for (const candidate of candidates) {
     tried.push(candidate);
-    let transport;
     try {
-      const { opts, normalized } = buildSmtpTransportOptions(account, candidate);
-      transport = nodemailer.createTransport(opts);
-      await transport.verify();
-      try {
-        transport.close();
-      } catch {
-        // ignore
-      }
-      return normalized;
+      return await verifyOneSmtp(account, candidate);
     } catch (err) {
       lastErr = err;
-      try {
-        transport?.close();
-      } catch {
-        // ignore
-      }
       const msg = String(err?.message || '');
+      const timedOut = err?.code === 'ETIMEDOUT' || err?.code === 'ESOCKET' || /timeout/i.test(msg);
       if (/invalid login|authentication failed|535|534|5\.7\.8|5\.7\.9/i.test(msg)) {
         break;
+      }
+      if (timedOut) {
+        try {
+          return await verifyOneSmtp(account, candidate, { family: 4 });
+        } catch (err2) {
+          lastErr = err2;
+        }
       }
     }
   }

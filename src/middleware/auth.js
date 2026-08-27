@@ -18,6 +18,7 @@ async function payloadFromPublicApi(token) {
       headers: { Authorization: authHeader, Accept: 'application/json' },
       signal: ctrl.signal
     });
+    console.log('[AUTH] public /email/status', res.status);
     if (!res.ok) return null;
     const raw = authHeader.replace(/^Bearer\s+/i, '');
     const decoded = jwt.decode(raw);
@@ -43,14 +44,18 @@ async function authenticateToken(req, res, next) {
     let payload;
     try {
       payload = verifyToken(String(token).replace(/^Bearer\s+/i, ''));
-    } catch {
+      console.log('[AUTH] local jwt ok', { userId: payload?.userId || null });
+    } catch (jwtErr) {
+      console.warn('[AUTH] local jwt failed, trying public API', jwtErr?.message || jwtErr);
       payload = await payloadFromPublicApi(token);
       if (!payload) {
+        console.warn('[AUTH] public API token check failed');
         return res.status(401).json({
           message: 'Please sign in again.',
           code: 'INVALID_TOKEN'
         });
       }
+      console.log('[AUTH] public API token ok', { userId: payload?.userId || null });
     }
 
     const user = await User.findById(payload.userId).select(
@@ -73,6 +78,11 @@ async function authenticateToken(req, res, next) {
 
     // Single-session login: only the latest login stays valid
     if (!payload.sessionId || !user.activeSessionId || payload.sessionId !== user.activeSessionId) {
+      console.warn('[AUTH] session replaced', {
+        hasPayloadSid: Boolean(payload.sessionId),
+        hasUserSid: Boolean(user.activeSessionId),
+        match: payload.sessionId === user.activeSessionId
+      });
       return res.status(401).json({
         message: 'You were signed out because your account signed in on another device.',
         code: 'SESSION_REPLACED'
