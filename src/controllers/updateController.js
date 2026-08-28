@@ -38,7 +38,7 @@ function getPublicBaseUrl(req) {
 
 /**
  * Sanitize the `app` query/param so each application gets its own update folder.
- * Multiple desktop apps (Dat Desk, Horizon, Swift) share this backend, so updates are
+ * Multiple desktop apps (Dat Desk, Horizon, Swift, Meridian, Smart Dat) share this backend, so updates are
  * namespaced under updates/<app>/<platform>/. Returns:
  *   - a safe slug string when a valid app is provided
  *   - '' when no app is provided (caller then falls back to DEFAULT_APP)
@@ -101,7 +101,7 @@ function listKnownApps() {
 }
 
 /** Always expose these desktop channels in admin even before a folder exists. */
-const MANAGED_APPS = ['datdesk', 'horizon', 'swift'];
+const MANAGED_APPS = ['datdesk', 'horizon', 'swift', 'meridian', 'smartdat'];
 
 /**
  * Get update information
