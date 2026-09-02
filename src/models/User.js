@@ -28,6 +28,12 @@ const permissionsSchema = new mongoose.Schema(
     webMultitabNumbers: { type: Number, default: 1, min: 1, max: 10 },
     /** Load managed Chromium extensions into Dat Desk / Horizon / Swift / Smart Dat */
     extensionsEnabled: { type: Boolean, default: true },
+    /** When false, never apply any proxy for this user (direct connection). */
+    proxyEnabled: { type: Boolean, default: true },
+    /** 0 = unlimited connected sending emails */
+    maxEmailAccounts: { type: Number, default: 3, min: 0, max: 100 },
+    /** 0 = unlimited email templates */
+    maxTemplates: { type: Number, default: 10, min: 0, max: 100 },
     /** In-app custom tab buttons on the desktop dashboard */
     customTabs: { type: [customTabSchema], default: [] }
   },

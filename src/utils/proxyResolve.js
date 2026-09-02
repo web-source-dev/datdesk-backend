@@ -2,6 +2,7 @@ const AppSettings = require('../models/AppSettings');
 const Proxy = require('../models/Proxy');
 const { formatProxy, isValidProxy } = require('./proxy');
 const { buildProxyString } = require('../controllers/userProxyController');
+const { isProxyEnabled } = require('./permissions');
 
 async function getAppSettings() {
   let settings = await AppSettings.findOne({ key: 'app' });
@@ -23,11 +24,21 @@ function proxyDocToString(doc) {
 
 /**
  * Resolve effective proxy for a user.
- * Priority: customProxy (Ctrl+Shift+P) → user.proxyId → global → legacy user.proxy
+ * Priority: proxyEnabled off → direct; else customProxy → user.proxyId → global → legacy
  */
 async function resolveProxyForUser(user) {
   if (!user) {
     return { proxy: null, source: null, proxyDoc: null, message: 'User not found' };
+  }
+
+  if (!isProxyEnabled(user.permissions)) {
+    return {
+      proxy: null,
+      source: 'direct',
+      proxyDoc: null,
+      proxyId: null,
+      message: null
+    };
   }
 
   const custom = buildProxyString(user.customProxy);

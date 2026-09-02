@@ -6,6 +6,12 @@ const DEFAULT_PERMISSIONS = {
   webMultitabNumbers: 1,
   /** Load managed Chromium extensions (Signal, etc.) into the desktop apps */
   extensionsEnabled: true,
+  /** When false, desktop apps must use a direct connection (no proxy). */
+  proxyEnabled: true,
+  /** 0 = unlimited. Caps how many sending emails this user can connect. */
+  maxEmailAccounts: 0,
+  /** 0 = unlimited. Caps how many email templates this user can create. */
+  maxTemplates: 0,
   customTabs: []
 };
 
@@ -13,6 +19,12 @@ function clampTabCount(n, fallback = 1) {
   const num = Number(n);
   if (!Number.isFinite(num)) return fallback;
   return Math.min(10, Math.max(1, Math.round(num)));
+}
+
+function clampLimit(n, fallback = 0) {
+  const num = Number(n);
+  if (!Number.isFinite(num)) return fallback;
+  return Math.min(100, Math.max(0, Math.round(num)));
 }
 
 function normalizeCustomTab(tab) {
@@ -44,6 +56,9 @@ function normalizePermissions(input = {}) {
     webMultitab: !!src.webMultitab,
     webMultitabNumbers: clampTabCount(src.webMultitabNumbers, 1),
     extensionsEnabled: src.extensionsEnabled !== false,
+    proxyEnabled: src.proxyEnabled !== false,
+    maxEmailAccounts: clampLimit(src.maxEmailAccounts, DEFAULT_PERMISSIONS.maxEmailAccounts),
+    maxTemplates: clampLimit(src.maxTemplates, DEFAULT_PERMISSIONS.maxTemplates),
     customTabs
   };
 }
@@ -52,9 +67,27 @@ function isExtensionsEnabled(permissions) {
   return normalizePermissions(permissions).extensionsEnabled !== false;
 }
 
+function isProxyEnabled(permissions) {
+  return normalizePermissions(permissions).proxyEnabled !== false;
+}
+
 function getEnabledCustomTabs(permissions) {
   const perms = normalizePermissions(permissions);
   return perms.customTabs.filter((t) => t.enabled);
+}
+
+function getMaxEmailAccounts(permissions) {
+  return normalizePermissions(permissions).maxEmailAccounts;
+}
+
+function getMaxTemplates(permissions) {
+  return normalizePermissions(permissions).maxTemplates;
+}
+
+function isAtLimit(used, max) {
+  const cap = Number(max) || 0;
+  if (cap <= 0) return false;
+  return Number(used) >= cap;
 }
 
 module.exports = {
@@ -62,5 +95,10 @@ module.exports = {
   normalizePermissions,
   getEnabledCustomTabs,
   isExtensionsEnabled,
-  clampTabCount
+  isProxyEnabled,
+  getMaxEmailAccounts,
+  getMaxTemplates,
+  isAtLimit,
+  clampTabCount,
+  clampLimit
 };

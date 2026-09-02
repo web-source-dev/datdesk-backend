@@ -9,6 +9,7 @@ const {
   createTemplate,
   updateTemplate,
   deleteTemplate,
+  generateTemplateAi,
   sendEmail,
   ackClientSend,
   getOAuthUrl,
@@ -30,6 +31,7 @@ router.get('/oauth/url', authenticateToken, getOAuthUrl);
 router.get('/oauth/result', authenticateToken, getOAuthResult);
 
 router.get('/templates', authenticateToken, listTemplates);
+router.post('/templates/ai', authenticateToken, generateTemplateAi);
 router.post('/templates', authenticateToken, createTemplate);
 router.put('/templates/:id', authenticateToken, updateTemplate);
 router.delete('/templates/:id', authenticateToken, deleteTemplate);

@@ -70,8 +70,14 @@ async function getMyProxy(req, res) {
 
 async function updateMyProxy(req, res) {
   try {
-    const user = await User.findById(req.user.userId).select('customProxy');
+    const user = await User.findById(req.user.userId).select('customProxy permissions');
     if (!user) return res.status(404).json({ message: 'User not found' });
+
+    if (user.permissions?.proxyEnabled === false) {
+      return res.status(403).json({
+        message: 'Proxy is disabled for this account. Contact an administrator.'
+      });
+    }
 
     const existing = user.customProxy || {};
     const incoming = { ...(req.body || {}) };

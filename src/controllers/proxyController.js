@@ -165,6 +165,16 @@ async function getResolvedProxy(req, res) {
     if (!user) return res.status(401).json({ message: 'User not found' });
 
     const resolved = await resolveProxyForUser(user);
+    if (resolved.source === 'direct') {
+      return res.json({
+        success: true,
+        proxy: null,
+        source: 'direct',
+        proxyId: null,
+        name: null
+      });
+    }
+
     if (!resolved.proxy) {
       return res.status(404).json({
         success: false,

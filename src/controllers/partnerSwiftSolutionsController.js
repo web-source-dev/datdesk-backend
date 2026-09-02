@@ -29,6 +29,10 @@ function buildSwiftSolutionsPermissions() {
     datMultitabNumbers: 10,
     webMultitab: true,
     webMultitabNumbers: 5,
+    extensionsEnabled: true,
+    proxyEnabled: true,
+    maxEmailAccounts: 3,
+    maxTemplates: 10,
     customTabs: []
   });
 }

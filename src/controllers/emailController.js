@@ -1,9 +1,21 @@
 const jwt = require('jsonwebtoken');
+const User = require('../models/User');
 const EmailAccount = require('../models/EmailAccount');
 const EmailTemplate = require('../models/EmailTemplate');
 const EmailSent = require('../models/EmailSent');
 const { encryptSecret, decryptSecret } = require('../utils/secretCrypto');
 const { logActivity } = require('../services/activityLogService');
+const { DEFAULT_LOAD_INQUIRY } = require('../constants/defaultEmailTemplates');
+const { generateEmailTemplate } = require('../services/openRouterService');
+const {
+  assertCanCreateEmailAccount,
+  assertCanCreateTemplate,
+  buildLimitsPayload,
+  getMaxTemplates,
+  getMaxEmailAccounts,
+  getUsableAccountIds,
+  unusableAccountMessage
+} = require('../services/emailLimits');
 const {
   applyTemplate,
   verifyAccountCredentials,
@@ -120,7 +132,7 @@ async function finishOAuthOnCloud(req) {
     return { ok: false, email: '', message: err.message || 'Could not reach the cloud API', status: 0 };
   }
   const html = await cloudRes.text();
-  const ok = /inbox connected/i.test(html);
+  const ok = /(?:inbox|email) connected/i.test(html);
   let email = '';
   const emailMatch = html.match(/class="email">([^<]+)/i);
   if (emailMatch) email = String(emailMatch[1] || '').trim();
@@ -132,6 +144,17 @@ async function finishOAuthOnCloud(req) {
 
 async function listAccounts(userId) {
   return EmailAccount.find({ userId }).sort({ isDefault: -1, connectedAt: -1 });
+}
+
+function serializeAccounts(accounts, permissions) {
+  const list = Array.isArray(accounts) ? accounts : [];
+  const usableIds = getUsableAccountIds(list, getMaxEmailAccounts(permissions));
+  return list.map((a) => ({
+    ...(typeof a.toSafeJSON === 'function'
+      ? a.toSafeJSON()
+      : { id: String(a._id), email: a.email, isDefault: Boolean(a.isDefault) }),
+    usable: usableIds.has(String(a._id || a.id))
+  }));
 }
 
 async function ensureDefaultAccount(userId, preferredId) {
@@ -157,21 +180,58 @@ async function ensureDefaultAccount(userId, preferredId) {
   return current;
 }
 
+async function ensureDefaultLoadInquiry(userId, permissions) {
+  const existing = await EmailTemplate.findOne({
+    userId,
+    name: DEFAULT_LOAD_INQUIRY.name
+  }).select('_id');
+  if (existing) return;
+  const max = getMaxTemplates(permissions);
+  if (max > 0) {
+    const count = await EmailTemplate.countDocuments({ userId });
+    if (count >= max) return;
+  }
+  const hasDefault = await EmailTemplate.exists({ userId, isDefault: true });
+  try {
+    await EmailTemplate.create({
+      userId,
+      name: DEFAULT_LOAD_INQUIRY.name,
+      subject: DEFAULT_LOAD_INQUIRY.subject,
+      body: DEFAULT_LOAD_INQUIRY.body,
+      isDefault: !hasDefault
+    });
+  } catch (error) {
+    if (error?.code !== 11000) throw error;
+  }
+}
+
 async function getStatus(req, res) {
   try {
+    await ensureDefaultLoadInquiry(req.user.userId, req.user.permissions);
     const [accounts, templates] = await Promise.all([
       listAccounts(req.user.userId),
       EmailTemplate.find({ userId: req.user.userId })
         .sort({ isDefault: -1, updatedAt: -1 })
         .lean()
     ]);
-    const defaultAccount = accounts.find((a) => a.isDefault) || accounts[0] || null;
+    const withUsable = serializeAccounts(accounts, req.user.permissions);
+    const defaultAccount =
+      withUsable.find((a) => a.isDefault && a.usable) ||
+      withUsable.find((a) => a.usable) ||
+      withUsable[0] ||
+      null;
 
     return res.json({
-      connected: accounts.length > 0,
-      account: defaultAccount ? defaultAccount.toSafeJSON() : null,
-      accounts: accounts.map((a) => a.toSafeJSON()),
+      connected: withUsable.some((a) => a.usable),
+      account: defaultAccount,
+      accounts: withUsable,
       oauthAvailable: isGoogleOAuthConfigured(),
+      limits: buildLimitsPayload(
+        req.user.permissions,
+        accounts.length,
+        templates.length,
+        withUsable.filter((a) => a.usable).length
+      ),
       templates: templates.map((t) => ({
         id: String(t._id),
         name: t.name,
@@ -201,6 +261,14 @@ async function connectAppPassword(req, res) {
     }
     if (!appPassword || appPassword.length < 8) {
       return res.status(400).json({ message: 'Enter a valid Gmail app password' });
+    }
+
+    const existingForLimit = await EmailAccount.findOne({
+      userId: req.user.userId,
+      email
+    }).select('_id');
+    if (!existingForLimit) {
+      await assertCanCreateEmailAccount(req.user.userId, req.user.permissions);
     }
 
     const draft = new EmailAccount({
@@ -267,7 +335,10 @@ async function connectAppPassword(req, res) {
       account: account.toSafeJSON()
     });
   } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to connect email' });
+    return res.status(error.status || 500).json({
+      message: error.message || 'Failed to connect email',
+      code: error.code
+    });
   }
 }
 
@@ -299,6 +370,14 @@ async function connectSmtp(req, res) {
         message:
           'SMTP host is required (e.g. smtp.gmail.com, smtp.office365.com). Leave blank only for known providers like Gmail/Outlook/Yahoo.'
       });
+    }
+
+    const existingForLimit = await EmailAccount.findOne({
+      userId: req.user.userId,
+      email
+    }).select('_id');
+    if (!existingForLimit) {
+      await assertCanCreateEmailAccount(req.user.userId, req.user.permissions);
     }
 
     console.log('[SMTP] connect request', {
@@ -415,60 +494,18 @@ async function connectSmtp(req, res) {
 
     return res.status(201).json({ message: 'SMTP connected', account: account.toSafeJSON() });
   } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to connect SMTP' });
+    return res.status(error.status || 500).json({
+      message: error.message || 'Failed to connect SMTP',
+      code: error.code
+    });
   }
 }
 
 async function disconnect(req, res) {
-  try {
-    const accountId = req.body?.accountId || req.query?.accountId;
-    if (accountId) {
-      const existing = await EmailAccount.findOne({
-        _id: accountId,
-        userId: req.user.userId
-      });
-      const result = await EmailAccount.deleteOne({
-        _id: accountId,
-        userId: req.user.userId
-      });
-      if (!result.deletedCount) {
-        return res.status(404).json({ message: 'Account not found' });
-      }
-      await ensureDefaultAccount(req.user.userId);
-      const accounts = await listAccounts(req.user.userId);
-      await logActivity({
-        userId: req.user.userId,
-        actorEmail: req.user.email,
-        action: 'email.disconnect',
-        category: 'email',
-        status: 'success',
-        message: `Disconnected ${existing?.email || accountId}`,
-        meta: { accountId: String(accountId), email: existing?.email || '' },
-        req
-      });
-      return res.json({
-        message: 'Email disconnected',
-        connected: accounts.length > 0,
-        accounts: accounts.map((a) => a.toSafeJSON())
-      });
-    }
-
-    const before = await EmailAccount.find({ userId: req.user.userId }).select('email');
-    await EmailAccount.deleteMany({ userId: req.user.userId });
-    await logActivity({
-      userId: req.user.userId,
-      actorEmail: req.user.email,
-      action: 'email.disconnect',
-      category: 'email',
-      status: 'success',
-      message: `Disconnected all email accounts (${before.length})`,
-      meta: { emails: before.map((a) => a.email) },
-      req
-    });
-    return res.json({ message: 'Email disconnected', connected: false, accounts: [] });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to disconnect' });
-  }
+  return res.status(403).json({
+    message: 'Connected emails can only be removed by an admin.',
+    code: 'EMAIL_ACCOUNT_REMOVE_FORBIDDEN'
+  });
 }
 
 async function setDefaultAccount(req, res) {
@@ -478,10 +515,12 @@ async function setDefaultAccount(req, res) {
     const account = await ensureDefaultAccount(req.user.userId, accountId);
     if (!account) return res.status(404).json({ message: 'Account not found' });
     const accounts = await listAccounts(req.user.userId);
+    const withUsable = serializeAccounts(accounts, req.user.permissions);
+    const safeDefault = withUsable.find((a) => a.id === String(account._id)) || withUsable[0];
     return res.json({
       message: 'Default account updated',
-      account: account.toSafeJSON(),
-      accounts: accounts.map((a) => a.toSafeJSON())
+      account: safeDefault,
+      accounts: withUsable
     });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to set default account' });
@@ -490,6 +529,7 @@ async function setDefaultAccount(req, res) {
 
 async function listTemplates(req, res) {
   try {
+    await ensureDefaultLoadInquiry(req.user.userId, req.user.permissions);
     const templates = await EmailTemplate.find({ userId: req.user.userId }).sort({
       isDefault: -1,
       updatedAt: -1
@@ -497,6 +537,24 @@ async function listTemplates(req, res) {
     return res.json({ templates: templates.map((t) => t.toSafeJSON()) });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to list templates' });
+  }
+}
+
+async function generateTemplateAi(req, res) {
+  try {
+    const template = await generateEmailTemplate({
+      prompt: req.body?.prompt,
+      name: req.body?.name,
+      subject: req.body?.subject,
+      body: req.body?.body,
+      mode: req.body?.mode
+    });
+    return res.json({ template });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      message: error.message || 'Failed to generate template',
+      code: error.code || 'AI_FAILED'
+    });
   }
 }
 
@@ -510,6 +568,8 @@ async function createTemplate(req, res) {
     if (!name || !subject || !body.trim()) {
       return res.status(400).json({ message: 'Name, subject, and body are required' });
     }
+
+    await assertCanCreateTemplate(req.user.userId, req.user.permissions);
 
     if (isDefault) {
       await EmailTemplate.updateMany({ userId: req.user.userId }, { $set: { isDefault: false } });
@@ -528,7 +588,10 @@ async function createTemplate(req, res) {
     if (error?.code === 11000) {
       return res.status(409).json({ message: 'A template with that name already exists' });
     }
-    return res.status(500).json({ message: error.message || 'Failed to create template' });
+    return res.status(error.status || 500).json({
+      message: error.message || 'Failed to create template',
+      code: error.code
+    });
   }
 }
 
@@ -577,20 +640,27 @@ async function deleteTemplate(req, res) {
   }
 }
 
-async function findSendingAccount(userId, accountId) {
+async function findSendingAccount(userId, accountId, permissions) {
+  const accounts = await EmailAccount.find({ userId })
+    .sort({ isDefault: -1, connectedAt: -1 })
+    .select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+  if (!accounts.length) return null;
+  const usableIds = getUsableAccountIds(accounts, getMaxEmailAccounts(permissions));
   if (accountId) {
-    return EmailAccount.findOne({
-      _id: accountId,
-      userId
-    }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
+    const match = accounts.find((a) => String(a._id) === String(accountId));
+    if (!match) return null;
+    if (!usableIds.has(String(match._id))) {
+      const err = new Error(unusableAccountMessage());
+      err.code = 'EMAIL_ACCOUNT_UNUSABLE';
+      err.status = 403;
+      throw err;
+    }
+    return match;
   }
-  const preferred = await EmailAccount.findOne({
-    userId,
-    isDefault: true
-  }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
-  if (preferred) return preferred;
-  return EmailAccount.findOne({ userId }).select(
-    '+appPasswordEnc +refreshTokenEnc +accessTokenEnc'
+  return (
+    accounts.find((a) => a.isDefault && usableIds.has(String(a._id))) ||
+    accounts.find((a) => usableIds.has(String(a._id))) ||
+    null
   );
 }
 
@@ -609,7 +679,7 @@ async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent 
 
   if (!account) {
     sent.status = 'failed';
-    sent.error = 'Inbox no longer connected';
+    sent.error = 'Email no longer connected';
     await sent.save();
     await logActivity({
       userId: sent.userId,
@@ -618,6 +688,27 @@ async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent 
       category: 'email',
       status: 'failure',
       message: `Failed to send email to ${sent.to}`,
+      meta: { to: sent.to, subject: sent.subject, emailSentId: String(sent._id) },
+      ip,
+      userAgent
+    });
+    return sent;
+  }
+
+  const owner = await User.findById(sent.userId).select('permissions');
+  const peers = await EmailAccount.find({ userId: sent.userId }).select('_id isDefault connectedAt');
+  const usableIds = getUsableAccountIds(peers, getMaxEmailAccounts(owner?.permissions));
+  if (!usableIds.has(String(account._id))) {
+    sent.status = 'failed';
+    sent.error = unusableAccountMessage();
+    await sent.save();
+    await logActivity({
+      userId: sent.userId,
+      actorEmail,
+      action: 'email.send',
+      category: 'email',
+      status: 'failure',
+      message: unusableAccountMessage(),
       meta: { to: sent.to, subject: sent.subject, emailSentId: String(sent._id) },
       ip,
       userAgent
@@ -710,7 +801,11 @@ async function resumeQueuedEmails() {
 
 async function sendEmail(req, res) {
   try {
-    const account = await findSendingAccount(req.user.userId, req.body?.accountId);
+    const account = await findSendingAccount(
+      req.user.userId,
+      req.body?.accountId,
+      req.user.permissions
+    );
 
     if (!account) {
       return res.status(400).json({ message: 'Connect an email account first' });
@@ -831,7 +926,10 @@ async function sendEmail(req, res) {
       },
       req
     });
-    return res.status(500).json({ message: error.message || 'Failed to send email' });
+    return res.status(error.status || 500).json({
+      message: error.message || 'Failed to send email',
+      code: error.code
+    });
   }
 }
 
@@ -845,7 +943,7 @@ function escapeHtml(value) {
 }
 
 function oauthResultHtml({ ok, email, message }) {
-  const title = ok ? 'Inbox connected' : "Couldn't connect that inbox";
+  const title = ok ? 'Email connected' : "Couldn't connect that email";
   const emailLine = email
     ? `<p class="email">${escapeHtml(email)}</p>`
     : '';
@@ -1009,10 +1107,19 @@ async function oauthCallback(req, res) {
       connectedAt: new Date()
     };
 
+    const existingOauth = await EmailAccount.findOne({ userId, email }).select('+refreshTokenEnc');
+    if (!existingOauth) {
+      const owner = await User.findById(userId).select('permissions');
+      try {
+        await assertCanCreateEmailAccount(userId, owner?.permissions);
+      } catch (limitErr) {
+        return fail(limitErr.message, userId);
+      }
+    }
+
     if (!tokens.refresh_token) {
-      const existing = await EmailAccount.findOne({ userId, email }).select('+refreshTokenEnc');
-      if (existing?.refreshTokenEnc) {
-        payload.refreshTokenEnc = existing.refreshTokenEnc;
+      if (existingOauth?.refreshTokenEnc) {
+        payload.refreshTokenEnc = existingOauth.refreshTokenEnc;
       } else {
         return fail('Google did not return a refresh token. Remove app access and try again.', userId);
       }
@@ -1086,6 +1193,7 @@ module.exports = {
   createTemplate,
   updateTemplate,
   deleteTemplate,
+  generateTemplateAi,
   sendEmail,
   ackClientSend,
   resumeQueuedEmails,

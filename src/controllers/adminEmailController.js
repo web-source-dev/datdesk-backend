@@ -6,8 +6,10 @@ const EmailTemplate = require('../models/EmailTemplate');
 const MailboxMessage = require('../models/MailboxMessage');
 const ActivityLog = require('../models/ActivityLog');
 const { logActivity } = require('../services/activityLogService');
+const EmailSyncState = require('../models/EmailSyncState');
 const { fetchMailboxMessagesBatch, canFetchLifetimeForAccount } = require('../services/mailService');
 const { processUnprocessedMessages } = require('../services/freightIntelligenceService');
+const { normalizePermissions } = require('../utils/permissions');
 
 function parsePaging(query, { defaultLimit = 50, maxLimit = 200 } = {}) {
   const page = Math.max(1, Number(query.page) || 1);
@@ -56,6 +58,7 @@ async function getUserDetail(req, res) {
         isBanned: user.isBanned,
         plan: user.plan,
         label: user.label,
+        permissions: normalizePermissions(user.permissions),
         createdAt: user.createdAt,
         updatedAt: user.updatedAt
       },
@@ -108,6 +111,77 @@ async function listUserEmailAccounts(req, res) {
     });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to list accounts' });
+  }
+}
+
+async function ensureDefaultAccount(userId, preferredId) {
+  const accounts = await EmailAccount.find({ userId }).sort({ isDefault: -1, connectedAt: -1 });
+  if (!accounts.length) return null;
+  if (preferredId) {
+    const match = accounts.find((a) => String(a._id) === String(preferredId));
+    if (match) {
+      if (!match.isDefault) {
+        await EmailAccount.updateMany({ userId }, { $set: { isDefault: false } });
+        match.isDefault = true;
+        await match.save();
+      }
+      return match;
+    }
+  }
+  const current = accounts.find((a) => a.isDefault) || accounts[0];
+  if (!current.isDefault) {
+    await EmailAccount.updateMany({ userId }, { $set: { isDefault: false } });
+    current.isDefault = true;
+    await current.save();
+  }
+  return current;
+}
+
+/** DELETE /admin/users/:userId/email-accounts/:accountId */
+async function deleteUserEmailAccount(req, res) {
+  try {
+    const user = await getUserOr404(req.params.userId, res);
+    if (!user) return undefined;
+    if (!isObjectId(req.params.accountId)) {
+      return res.status(400).json({ message: 'Invalid account id' });
+    }
+
+    const account = await EmailAccount.findOne({
+      _id: req.params.accountId,
+      userId: user._id
+    });
+    if (!account) return res.status(404).json({ message: 'Email account not found' });
+
+    await EmailAccount.deleteOne({ _id: account._id, userId: user._id });
+    await EmailSyncState.deleteMany({ accountId: account._id });
+    await ensureDefaultAccount(user._id);
+
+    const remaining = await EmailAccount.find({ userId: user._id }).sort({
+      isDefault: -1,
+      connectedAt: -1
+    });
+
+    await logActivity({
+      userId: user._id,
+      actorEmail: req.user?.email || '',
+      action: 'email.admin_remove',
+      category: 'admin',
+      status: 'success',
+      message: `Removed ${account.email} from ${user.email}`,
+      meta: {
+        accountId: String(account._id),
+        accountEmail: account.email,
+        method: account.method
+      },
+      req
+    });
+
+    return res.json({
+      message: `Removed ${account.email}`,
+      accounts: remaining.map((a) => a.toSafeJSON())
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message || 'Failed to remove email account' });
   }
 }
 
@@ -527,6 +601,7 @@ async function listAllEmailAccounts(req, res) {
 module.exports = {
   getUserDetail,
   listUserEmailAccounts,
+  deleteUserEmailAccount,
   listAccountSentEmails,
   listUserSentEmails,
   getSentEmail,
