@@ -3,6 +3,7 @@ const { authenticateToken, requireAdmin } = require('../middleware/auth');
 const {
   getUserDetail,
   listUserEmailAccounts,
+  updateUserEmailAccount,
   deleteUserEmailAccount,
   listAccountSentEmails,
   listUserSentEmails,
@@ -10,6 +11,7 @@ const {
   listAllSentEmails,
   listMailboxMessages,
   getMailboxMessage,
+  listAllMailboxMessages,
   fetchLifetimeEmails,
   listActivity,
   listUserActivity,
@@ -37,6 +39,7 @@ router.get('/activity', listActivity);
 router.get('/email/accounts', listAllEmailAccounts);
 router.get('/email/sent', listAllSentEmails);
 router.get('/email/sent/:id', getSentEmail);
+router.get('/email/mailbox', listAllMailboxMessages);
 router.get('/mailbox/:id', getMailboxMessage);
 
 router.get('/freight/overview', getOverview);
@@ -54,6 +57,7 @@ router.patch('/freight/sync/accounts/:accountId', updateSyncAccount);
 router.get('/users/:userId', getUserDetail);
 router.get('/users/:userId/activity', listUserActivity);
 router.get('/users/:userId/email-accounts', listUserEmailAccounts);
+router.patch('/users/:userId/email-accounts/:accountId', updateUserEmailAccount);
 router.delete('/users/:userId/email-accounts/:accountId', deleteUserEmailAccount);
 router.get('/users/:userId/sent', listUserSentEmails);
 router.get('/users/:userId/email-accounts/:accountId/sent', listAccountSentEmails);

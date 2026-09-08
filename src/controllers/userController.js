@@ -5,6 +5,7 @@ const { resolveProxyForUser } = require('../utils/proxyResolve');
 const { resolveCookieForUser } = require('../utils/cookies');
 const { getCookieChannelForUser } = require('../utils/cookieChannels');
 const { normalizePermissions, getEnabledCustomTabs } = require('../utils/permissions');
+const { syncAllowedAccounts } = require('../services/emailLimits');
 
 function normalizePlan(plan) {
   const p = String(plan || 'single').trim().toLowerCase();
@@ -302,6 +303,9 @@ async function updateUser(req, res) {
     }
 
     await user.save();
+    if (permissions !== undefined) {
+      await syncAllowedAccounts(user._id, user.permissions);
+    }
     await user.populate('proxyId');
     await user.populate('assignedCookieId');
     return res.json(await enrichUser(user));

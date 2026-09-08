@@ -33,6 +33,8 @@ const emailAccountSchema = new mongoose.Schema(
     /** Login user if different from From address */
     smtpUser: { type: String, trim: true, default: '' },
     isDefault: { type: Boolean, default: false },
+    /** When false, connected but cannot send. Stable allowlist independent of isDefault. */
+    allowed: { type: Boolean, default: true },
     connectedAt: { type: Date, default: Date.now }
   },
   { timestamps: true }
@@ -51,6 +53,7 @@ emailAccountSchema.methods.toSafeJSON = function toSafeJSON() {
     smtpSecure: this.method === 'smtp' ? Boolean(this.smtpSecure) : undefined,
     smtpUser: this.method === 'smtp' ? this.smtpUser || '' : undefined,
     isDefault: Boolean(this.isDefault),
+    allowed: this.allowed === true,
     connectedAt: this.connectedAt,
     connected: true
   };

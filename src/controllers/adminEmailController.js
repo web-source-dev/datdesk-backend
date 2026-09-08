@@ -10,6 +10,14 @@ const EmailSyncState = require('../models/EmailSyncState');
 const { fetchMailboxMessagesBatch, canFetchLifetimeForAccount } = require('../services/mailService');
 const { processUnprocessedMessages } = require('../services/freightIntelligenceService');
 const { normalizePermissions } = require('../utils/permissions');
+const {
+  syncAllowedAccounts,
+  setAccountAllowed,
+  ensureDefaultAmongAllowed,
+  getMaxEmailAccounts,
+  isAllowedFlag,
+  listUserAccounts
+} = require('../services/emailLimits');
 
 function parsePaging(query, { defaultLimit = 50, maxLimit = 200 } = {}) {
   const page = Math.max(1, Number(query.page) || 1);
@@ -81,10 +89,7 @@ async function listUserEmailAccounts(req, res) {
     const user = await getUserOr404(req.params.userId, res);
     if (!user) return undefined;
 
-    const accounts = await EmailAccount.find({ userId: user._id }).sort({
-      isDefault: -1,
-      connectedAt: -1
-    });
+    const accounts = await syncAllowedAccounts(user._id, user.permissions);
 
     const counts = await EmailSent.aggregate([
       { $match: { userId: user._id } },
@@ -102,8 +107,11 @@ async function listUserEmailAccounts(req, res) {
     );
 
     return res.json({
+      maxEmailAccounts: getMaxEmailAccounts(user.permissions),
       accounts: accounts.map((a) => ({
         ...a.toSafeJSON(),
+        allowed: isAllowedFlag(a),
+        usable: isAllowedFlag(a),
         sentCount: sentByAccount[String(a._id)] || 0,
         mailboxCount: mailboxByAccount[String(a._id)] || 0,
         canFetchLifetime: canFetchLifetimeForAccount(a)
@@ -114,27 +122,81 @@ async function listUserEmailAccounts(req, res) {
   }
 }
 
-async function ensureDefaultAccount(userId, preferredId) {
-  const accounts = await EmailAccount.find({ userId }).sort({ isDefault: -1, connectedAt: -1 });
-  if (!accounts.length) return null;
-  if (preferredId) {
-    const match = accounts.find((a) => String(a._id) === String(preferredId));
-    if (match) {
-      if (!match.isDefault) {
-        await EmailAccount.updateMany({ userId }, { $set: { isDefault: false } });
-        match.isDefault = true;
-        await match.save();
-      }
-      return match;
+/** PATCH /admin/users/:userId/email-accounts/:accountId */
+async function updateUserEmailAccount(req, res) {
+  try {
+    const user = await getUserOr404(req.params.userId, res);
+    if (!user) return undefined;
+    if (!isObjectId(req.params.accountId)) {
+      return res.status(400).json({ message: 'Invalid account id' });
     }
+
+    const hasAllowed = typeof req.body?.allowed === 'boolean';
+    const hasDefault = req.body?.isDefault === true;
+    if (!hasAllowed && !hasDefault) {
+      return res.status(400).json({ message: 'Provide allowed or isDefault' });
+    }
+
+    if (hasAllowed) {
+      await setAccountAllowed(user._id, req.params.accountId, req.body.allowed, user.permissions);
+    }
+
+    if (hasDefault) {
+      const accounts = await EmailAccount.find({ userId: user._id });
+      const match = accounts.find((a) => String(a._id) === String(req.params.accountId));
+      if (!match) return res.status(404).json({ message: 'Email account not found' });
+      if (match.allowed === false && req.body?.allowed !== true) {
+        return res.status(403).json({
+          message: 'Enable this email before making it the default.',
+          code: 'EMAIL_ACCOUNT_UNUSABLE'
+        });
+      }
+      await ensureDefaultAmongAllowed(user._id, match._id);
+    }
+
+    const remaining = await listUserAccounts(user._id);
+
+    await logActivity({
+      userId: user._id,
+      actorEmail: req.user?.email || '',
+      action: hasAllowed
+        ? req.body.allowed
+          ? 'email.admin_enable'
+          : 'email.admin_disable'
+        : 'email.admin_default',
+      category: 'admin',
+      status: 'success',
+      message: hasAllowed
+        ? `${req.body.allowed ? 'Enabled' : 'Disabled'} ${
+            remaining.find((a) => String(a._id) === String(req.params.accountId))?.email || 'email'
+          } for ${user.email}`
+        : `Set default email for ${user.email}`,
+      meta: {
+        accountId: String(req.params.accountId),
+        allowed: hasAllowed ? Boolean(req.body.allowed) : undefined,
+        isDefault: hasDefault || undefined
+      },
+      req
+    });
+
+    return res.json({
+      message: hasAllowed
+        ? req.body.allowed
+          ? 'Email enabled for sending'
+          : 'Email disabled for sending'
+        : 'Default email updated',
+      accounts: remaining.map((a) => ({
+        ...a.toSafeJSON(),
+        allowed: isAllowedFlag(a),
+        usable: isAllowedFlag(a)
+      }))
+    });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      message: error.message || 'Failed to update email account',
+      code: error.code
+    });
   }
-  const current = accounts.find((a) => a.isDefault) || accounts[0];
-  if (!current.isDefault) {
-    await EmailAccount.updateMany({ userId }, { $set: { isDefault: false } });
-    current.isDefault = true;
-    await current.save();
-  }
-  return current;
 }
 
 /** DELETE /admin/users/:userId/email-accounts/:accountId */
@@ -154,12 +216,9 @@ async function deleteUserEmailAccount(req, res) {
 
     await EmailAccount.deleteOne({ _id: account._id, userId: user._id });
     await EmailSyncState.deleteMany({ accountId: account._id });
-    await ensureDefaultAccount(user._id);
+    await ensureDefaultAmongAllowed(user._id);
 
-    const remaining = await EmailAccount.find({ userId: user._id }).sort({
-      isDefault: -1,
-      connectedAt: -1
-    });
+    const remaining = await listUserAccounts(user._id);
 
     await logActivity({
       userId: user._id,
@@ -178,7 +237,11 @@ async function deleteUserEmailAccount(req, res) {
 
     return res.json({
       message: `Removed ${account.email}`,
-      accounts: remaining.map((a) => a.toSafeJSON())
+      accounts: remaining.map((a) => ({
+        ...a.toSafeJSON(),
+        allowed: isAllowedFlag(a),
+        usable: isAllowedFlag(a)
+      }))
     });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to remove email account' });
@@ -598,9 +661,65 @@ async function listAllEmailAccounts(req, res) {
   }
 }
 
+/** GET /admin/email/mailbox — global mailbox search across users */
+async function listAllMailboxMessages(req, res) {
+  try {
+    const { page, limit, skip } = parsePaging(req.query);
+    const search = String(req.query.search || '').trim();
+    const direction = String(req.query.direction || '').trim();
+    const filter = {};
+    if (req.query.userId && isObjectId(req.query.userId)) filter.userId = req.query.userId;
+    if (req.query.accountId && isObjectId(req.query.accountId)) {
+      filter.accountId = req.query.accountId;
+    }
+    if (direction === 'inbound' || direction === 'outbound') filter.direction = direction;
+    if (search) {
+      filter.$or = [
+        { to: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { from: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { subject: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
+        { snippet: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
+      ];
+    }
+
+    const [total, rows] = await Promise.all([
+      MailboxMessage.countDocuments(filter),
+      MailboxMessage.find(filter)
+        .sort({ internalDate: -1, createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .populate('userId', 'name email')
+        .populate('accountId', 'email displayName')
+    ]);
+
+    return res.json({
+      page,
+      limit,
+      total,
+      messages: rows.map((r) => ({
+        ...r.toSafeJSON(false),
+        user: r.userId
+          ? {
+              _id: String(r.userId._id || r.userId),
+              name: r.userId.name,
+              email: r.userId.email
+            }
+          : null,
+        accountEmail:
+          r.accountId && typeof r.accountId === 'object'
+            ? r.accountId.email || ''
+            : ''
+      }))
+    });
+  } catch (error) {
+    return res.status(500).json({ message: error.message || 'Failed to list mailbox' });
+  }
+}
+
 module.exports = {
   getUserDetail,
   listUserEmailAccounts,
+  updateUserEmailAccount,
   deleteUserEmailAccount,
   listAccountSentEmails,
   listUserSentEmails,
@@ -608,6 +727,7 @@ module.exports = {
   listAllSentEmails,
   listMailboxMessages,
   getMailboxMessage,
+  listAllMailboxMessages,
   fetchLifetimeEmails,
   listActivity,
   listUserActivity,
