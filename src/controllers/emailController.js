@@ -1,10 +1,8 @@
-const mongoose = require('mongoose');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const EmailAccount = require('../models/EmailAccount');
 const EmailTemplate = require('../models/EmailTemplate');
 const EmailSent = require('../models/EmailSent');
-const MailboxMessage = require('../models/MailboxMessage');
 const { encryptSecret, decryptSecret } = require('../utils/secretCrypto');
 const { logActivity } = require('../services/activityLogService');
 const { DEFAULT_LOAD_INQUIRY } = require('../constants/defaultEmailTemplates');
@@ -33,17 +31,8 @@ const {
   fetchGoogleProfile,
   getOAuthRedirectUri,
   normalizeSmtpSettings,
-  probeSmtpTcp,
-  canFetchLifetimeForAccount,
-  inferSmtpPreset,
-  getGmailMessage
+  probeSmtpTcp
 } = require('../services/mailService');
-const {
-  buildConversationKey,
-  normalizeSubjectRoot,
-  syncConversationForSent,
-  syncAppConversationsForAccount
-} = require('../services/conversationSyncService');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
@@ -161,7 +150,7 @@ async function listAccounts(userId) {
   return listUserAccounts(userId);
 }
 
-function serializeAccounts(accounts, permissions, mailboxCounts = {}) {
+function serializeAccounts(accounts, permissions) {
   const list = Array.isArray(accounts) ? accounts : [];
   const usableIds = getUsableAccountIds(list, getMaxEmailAccounts(permissions));
   return list.map((a) => {
@@ -172,78 +161,8 @@ function serializeAccounts(accounts, permissions, mailboxCounts = {}) {
         ? a.toSafeJSON()
         : { id, email: a.email, isDefault: Boolean(a.isDefault), allowed: usable }),
       allowed: usable,
-      usable,
-      canSync: canFetchLifetimeForAccount(a),
-      mailboxCount: mailboxCounts[id] || 0
+      usable
     };
-  });
-}
-
-async function mirrorSentEmailToMailbox(sent, account) {
-  if (!sent || sent.status !== 'sent' || !account) return;
-  const providerMessageId = String(sent.messageId || '').trim() || `local-sent-${sent._id}`;
-  const provider = account.method === 'oauth' ? 'gmail' : 'imap';
-  const conversationKey =
-    sent.conversationKey ||
-    buildConversationKey(account._id, sent.to, sent.rootSubject || sent.subject);
-  await MailboxMessage.findOneAndUpdate(
-    { accountId: account._id, providerMessageId },
-    {
-      $set: {
-        userId: sent.userId,
-        accountId: account._id,
-        provider,
-        providerMessageId,
-        threadId: sent.threadId || '',
-        conversationKey,
-        emailSentId: sent._id,
-        isAppConversation: true,
-        labelIds: ['SENT'],
-        direction: 'outbound',
-        from: sent.from || account.email,
-        to: sent.to,
-        cc: '',
-        subject: sent.subject || '',
-        snippet: String(sent.body || '').replace(/\s+/g, ' ').slice(0, 2000),
-        body: sent.body || '',
-        bodyHtml: '',
-        internalDate: sent.sentAt || sent.createdAt || new Date(),
-        syncedAt: new Date()
-      }
-    },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  );
-}
-
-function scheduleConversationSync(sentId, accountId) {
-  if (!sentId || !accountId) return;
-  setImmediate(() => {
-    Promise.all([
-      EmailSent.findById(sentId),
-      EmailAccount.findById(accountId).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc')
-    ])
-      .then(([sent, account]) => {
-        if (!sent || !account || sent.status !== 'sent') return undefined;
-        return syncConversationForSent(sent, account);
-      })
-      .catch((err) => {
-        console.warn('[conversation-sync] post-send sync failed:', err?.message || err);
-      });
-  });
-}
-
-function scheduleInitialMailboxSync(accountId) {
-  if (!accountId) return;
-  setImmediate(() => {
-    EmailAccount.findById(accountId)
-      .select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc')
-      .then((account) => {
-        if (!account || !canFetchLifetimeForAccount(account)) return undefined;
-        return syncAppConversationsForAccount(account, { limit: 30 });
-      })
-      .catch((err) => {
-        console.warn('[conversation-sync] initial sync failed:', err?.message || err);
-      });
   });
 }
 
@@ -292,22 +211,7 @@ async function getStatus(req, res) {
         .sort({ isDefault: -1, updatedAt: -1 })
         .lean()
     ]);
-    const mailboxCounts = Object.fromEntries(
-      (
-        await EmailSent.aggregate([
-          {
-            $match: {
-              userId: req.user.userId,
-              status: 'sent',
-              conversationKey: { $exists: true, $ne: '' }
-            }
-          },
-          { $group: { _id: { accountId: '$accountId', key: '$conversationKey' } } },
-          { $group: { _id: '$_id.accountId', count: { $sum: 1 } } }
-        ])
-      ).map((row) => [String(row._id), row.count])
-    );
-    const withUsable = serializeAccounts(accounts, req.user.permissions, mailboxCounts);
+    const withUsable = serializeAccounts(accounts, req.user.permissions);
     const defaultAccount =
       withUsable.find((a) => a.isDefault && a.usable) ||
       withUsable.find((a) => a.usable) ||
@@ -373,12 +277,6 @@ async function connectAppPassword(req, res) {
       connectedAt: new Date(),
       isDefault: false
     });
-    const preset = inferSmtpPreset(email);
-    if (preset) {
-      draft.smtpHost = preset.host;
-      draft.smtpPort = preset.port;
-      draft.smtpSecure = preset.secure;
-    }
 
     try {
       await verifyAccountCredentials(draft);
@@ -386,7 +284,7 @@ async function connectAppPassword(req, res) {
       return res.status(400).json({
         message:
           err.message ||
-          'Could not connect. Use an app password from your email provider (not your normal login password).',
+          'Could not connect. Use a Gmail App Password (Google Account → Security → App passwords).',
         code: err.code || 'SMTP_VERIFY_FAILED'
       });
     }
@@ -404,15 +302,9 @@ async function connectAppPassword(req, res) {
       account.accessTokenEnc = '';
       account.accessTokenExpiresAt = null;
       account.displayName = displayName;
-      if (preset) {
-        account.smtpHost = preset.host;
-        account.smtpPort = preset.port;
-        account.smtpSecure = preset.secure;
-      } else {
-        account.smtpHost = '';
-        account.smtpPort = 587;
-        account.smtpSecure = false;
-      }
+      account.smtpHost = '';
+      account.smtpPort = 587;
+      account.smtpSecure = false;
       account.connectedAt = new Date();
       await account.save();
     } else {
@@ -437,9 +329,7 @@ async function connectAppPassword(req, res) {
       req
     });
 
-    scheduleInitialMailboxSync(account._id);
-
-    return res.status(created ? 201 : 200).json({
+    return res.status(account.wasNew ? 201 : 200).json({
       message: 'Email connected',
       account: account.toSafeJSON()
     });
@@ -841,65 +731,18 @@ async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent 
   }
 
   try {
-    const rootSubject = normalizeSubjectRoot(sent.rootSubject || sent.subject);
-    let conversationKey = sent.conversationKey || '';
-    let threadId = sent.threadId || '';
-    let inReplyTo = '';
-    let references = '';
-
-    if (sent.replyToEmailSentId) {
-      const parent = await EmailSent.findOne({
-        _id: sent.replyToEmailSentId,
-        userId: sent.userId,
-        status: 'sent'
-      });
-      if (parent) {
-        conversationKey =
-          parent.conversationKey ||
-          buildConversationKey(account._id, parent.to, parent.rootSubject || parent.subject);
-        threadId = parent.threadId || threadId;
-        if (parent.messageId) {
-          inReplyTo = parent.messageId.includes('@') ? parent.messageId : `<${parent.messageId}>`;
-          references = inReplyTo;
-        }
-      }
-    }
-
-    if (!conversationKey) {
-      conversationKey = buildConversationKey(account._id, sent.to, rootSubject);
-    }
-
-    sent.conversationKey = conversationKey;
-    sent.rootSubject = rootSubject;
-    sent.threadId = threadId;
-    await sent.save();
-
     const result = await sendMail({
       account,
       to: sent.to,
       subject: sent.subject,
-      body: sent.body,
-      threadId: account.method === 'oauth' ? threadId : undefined,
-      inReplyTo: account.method === 'oauth' ? inReplyTo : undefined,
-      references: account.method === 'oauth' ? references : undefined
+      body: sent.body
     });
     sent.status = 'sent';
     sent.error = '';
     sent.messageId = result?.messageId || result?.id || '';
-    sent.threadId = result?.threadId || sent.threadId || '';
-    if (!sent.threadId && sent.messageId && account.method === 'oauth') {
-      try {
-        const full = await getGmailMessage(account, sent.messageId, account.email);
-        sent.threadId = full.threadId || sent.threadId;
-      } catch {
-        // ignore
-      }
-    }
     sent.sentAt = new Date();
     sent.method = account.method || sent.method || 'unknown';
     await sent.save();
-    await mirrorSentEmailToMailbox(sent, account);
-    scheduleConversationSync(sent._id, account._id);
     await logActivity({
       userId: sent.userId,
       actorEmail,
@@ -1020,43 +863,6 @@ async function sendEmail(req, res) {
       return res.status(400).json({ message: 'Subject and body are required' });
     }
 
-    let replyToEmailSentId = req.body?.replyToEmailSentId || req.body?.replyToSentId || null;
-    let conversationKey = '';
-    let rootSubject = normalizeSubjectRoot(subject);
-    let threadId = '';
-    let parentSent = null;
-
-    if (replyToEmailSentId && isObjectId(replyToEmailSentId)) {
-      parentSent = await EmailSent.findOne({
-        _id: replyToEmailSentId,
-        userId: req.user.userId,
-        status: 'sent'
-      });
-    } else if (req.body?.conversationKey) {
-      parentSent = await EmailSent.findOne({
-        userId: req.user.userId,
-        accountId: account._id,
-        conversationKey: String(req.body.conversationKey),
-        status: 'sent'
-      }).sort({ sentAt: -1, createdAt: -1 });
-      if (parentSent) replyToEmailSentId = String(parentSent._id);
-    }
-
-    if (parentSent) {
-      conversationKey =
-        parentSent.conversationKey ||
-        buildConversationKey(account._id, parentSent.to, parentSent.rootSubject || parentSent.subject);
-      rootSubject = parentSent.rootSubject || normalizeSubjectRoot(parentSent.subject);
-      threadId = parentSent.threadId || '';
-      if (!/^re:/i.test(subject)) {
-        subject = `Re: ${rootSubject}`;
-      }
-    } else {
-      conversationKey = buildConversationKey(account._id, to, subject);
-      rootSubject = normalizeSubjectRoot(subject);
-      replyToEmailSentId = null;
-    }
-
     const queued = await EmailSent.create({
       userId: req.user.userId,
       accountId: account._id,
@@ -1067,10 +873,6 @@ async function sendEmail(req, res) {
       body,
       method: account.method || 'unknown',
       messageId: '',
-      conversationKey,
-      rootSubject,
-      threadId,
-      replyToEmailSentId: parentSent?._id || null,
       vars,
       status: 'queued',
       queuedAt: new Date()
@@ -1365,8 +1167,6 @@ async function oauthCallback(req, res) {
       req
     });
 
-    scheduleInitialMailboxSync(account._id);
-
     rememberOAuth(userId, { status: 'ok', email: profile.email, message: '' });
     return redirectOAuthResult(res, {
       status: 'ok',
@@ -1397,392 +1197,9 @@ async function ackClientSend(req, res) {
       sent.messageId = String(req.body?.messageId || sent.messageId || '');
     }
     await sent.save();
-    if (ok && sent.status === 'sent') {
-      const account = await EmailAccount.findOne({
-        _id: sent.accountId,
-        userId: req.user.userId
-      });
-      if (account) {
-        if (!sent.conversationKey) {
-          sent.conversationKey = buildConversationKey(
-            account._id,
-            sent.to,
-            sent.rootSubject || sent.subject
-          );
-          sent.rootSubject = normalizeSubjectRoot(sent.rootSubject || sent.subject);
-          await sent.save();
-        }
-        await mirrorSentEmailToMailbox(sent, account);
-        scheduleConversationSync(sent._id, account._id);
-      }
-    }
     return res.json({ ok: true, status: sent.status });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to update send' });
-  }
-}
-
-function parseMailboxPaging(query, { defaultLimit = 30, maxLimit = 100 } = {}) {
-  const page = Math.max(1, Number(query.page) || 1);
-  const limit = Math.min(maxLimit, Math.max(1, Number(query.limit) || defaultLimit));
-  const skip = (page - 1) * limit;
-  return { page, limit, skip };
-}
-
-function isObjectId(id) {
-  return mongoose.Types.ObjectId.isValid(String(id || ''));
-}
-
-function buildMailboxSearchFilter(search) {
-  const term = String(search || '').trim();
-  if (!term) return null;
-  const re = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-  return {
-    $or: [{ to: re }, { from: re }, { subject: re }, { snippet: re }]
-  };
-}
-
-async function findUserEmailAccount(userId, accountId, res) {
-  if (!isObjectId(accountId)) {
-    res.status(400).json({ message: 'Invalid account id' });
-    return null;
-  }
-  const account = await EmailAccount.findOne({ _id: accountId, userId });
-  if (!account) {
-    res.status(404).json({ message: 'Email account not found' });
-    return null;
-  }
-  return account;
-}
-
-/** GET /email/mailbox?accountId=&direction=&search=&page=&limit= — app conversations only */
-async function listUserMailbox(req, res) {
-  try {
-    const accountId = String(req.query.accountId || '').trim();
-    if (!accountId) {
-      return res.status(400).json({ message: 'accountId is required' });
-    }
-
-    const account = await findUserEmailAccount(req.user.userId, accountId, res);
-    if (!account) return undefined;
-
-    const { page, limit, skip } = parseMailboxPaging(req.query);
-    const direction = String(req.query.direction || '').trim();
-    const filter = {
-      userId: req.user.userId,
-      accountId: account._id,
-      isAppConversation: true
-    };
-    if (direction === 'inbound' || direction === 'outbound') {
-      filter.direction = direction;
-    }
-    const searchFilter = buildMailboxSearchFilter(req.query.search);
-    if (searchFilter) Object.assign(filter, searchFilter);
-
-    const [total, rows] = await Promise.all([
-      MailboxMessage.countDocuments(filter),
-      MailboxMessage.find(filter)
-        .sort({ internalDate: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-    ]);
-
-    return res.json({
-      account: {
-        ...account.toSafeJSON(),
-        canFetchLifetime: canFetchLifetimeForAccount(account)
-      },
-      page,
-      limit,
-      total,
-      messages: rows.map((r) => r.toSafeJSON(false))
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to list mailbox' });
-  }
-}
-
-/** GET /email/conversations?accountId=&search=&page=&limit= */
-async function listUserConversations(req, res) {
-  try {
-    const accountId = String(req.query.accountId || '').trim();
-    if (!accountId) {
-      return res.status(400).json({ message: 'accountId is required' });
-    }
-
-    const account = await findUserEmailAccount(req.user.userId, accountId, res);
-    if (!account) return undefined;
-
-    const { page, limit, skip } = parseMailboxPaging(req.query);
-    const match = {
-      userId: req.user.userId,
-      accountId: account._id,
-      status: 'sent',
-      conversationKey: { $exists: true, $ne: '' }
-    };
-    const searchFilter = buildMailboxSearchFilter(req.query.search);
-    if (searchFilter) Object.assign(match, searchFilter);
-
-    const groupStages = [
-      { $match: match },
-      { $sort: { sentAt: -1, createdAt: -1 } },
-      {
-        $group: {
-          _id: '$conversationKey',
-          conversationKey: { $first: '$conversationKey' },
-          to: { $first: '$to' },
-          subject: { $first: '$rootSubject' },
-          rootSubject: { $first: '$rootSubject' },
-          threadId: { $first: '$threadId' },
-          emailSentId: { $first: '$_id' },
-          lastSentAt: { $max: '$sentAt' },
-          sentCount: { $sum: 1 }
-        }
-      },
-      { $sort: { lastSentAt: -1 } }
-    ];
-
-    const [countRows, grouped] = await Promise.all([
-      EmailSent.aggregate([...groupStages, { $count: 'total' }]),
-      EmailSent.aggregate([...groupStages, { $skip: skip }, { $limit: limit }])
-    ]);
-
-    const total = countRows[0]?.total || 0;
-    const keys = grouped.map((row) => row.conversationKey).filter(Boolean);
-    const stats = keys.length
-      ? await MailboxMessage.aggregate([
-          {
-            $match: {
-              userId: req.user.userId,
-              accountId: account._id,
-              conversationKey: { $in: keys },
-              isAppConversation: true
-            }
-          },
-          {
-            $group: {
-              _id: '$conversationKey',
-              messageCount: { $sum: 1 },
-              inboundCount: {
-                $sum: { $cond: [{ $eq: ['$direction', 'inbound'] }, 1, 0] }
-              },
-              lastSnippet: { $last: '$snippet' },
-              lastSubject: { $last: '$subject' },
-              lastDate: { $max: '$internalDate' }
-            }
-          }
-        ])
-      : [];
-    const statsByKey = Object.fromEntries(stats.map((row) => [row._id, row]));
-
-    const conversations = grouped.map((row) => {
-      const stat = statsByKey[row.conversationKey] || {};
-      return {
-        conversationKey: row.conversationKey,
-        to: row.to,
-        subject: stat.lastSubject || row.rootSubject || row.subject || '',
-        rootSubject: row.rootSubject || row.subject || '',
-        threadId: row.threadId || '',
-        emailSentId: String(row.emailSentId),
-        lastSentAt: row.lastSentAt,
-        sentCount: row.sentCount,
-        messageCount: stat.messageCount || row.sentCount || 0,
-        inboundCount: stat.inboundCount || 0,
-        lastSnippet: stat.lastSnippet || '',
-        lastDate: stat.lastDate || row.lastSentAt
-      };
-    });
-
-    return res.json({
-      account: {
-        ...account.toSafeJSON(),
-        canFetchLifetime: canFetchLifetimeForAccount(account)
-      },
-      page,
-      limit,
-      total,
-      conversations
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to list conversations' });
-  }
-}
-
-/** GET /email/conversations/:conversationKey/messages?accountId= */
-async function getConversationMessages(req, res) {
-  try {
-    const conversationKey = decodeURIComponent(String(req.params.conversationKey || '').trim());
-    if (!conversationKey) {
-      return res.status(400).json({ message: 'conversationKey is required' });
-    }
-
-    const accountId = String(req.query.accountId || '').trim();
-    if (!accountId) {
-      return res.status(400).json({ message: 'accountId is required' });
-    }
-
-    const account = await findUserEmailAccount(req.user.userId, accountId, res);
-    if (!account) return undefined;
-
-    const anchor = await EmailSent.findOne({
-      userId: req.user.userId,
-      accountId: account._id,
-      conversationKey,
-      status: 'sent'
-    }).sort({ sentAt: -1, createdAt: -1 });
-
-    if (!anchor) {
-      return res.status(404).json({ message: 'Conversation not found' });
-    }
-
-    const messages = await MailboxMessage.find({
-      userId: req.user.userId,
-      accountId: account._id,
-      conversationKey,
-      isAppConversation: true
-    }).sort({ internalDate: 1, createdAt: 1 });
-
-    return res.json({
-      conversationKey,
-      to: anchor.to,
-      subject: anchor.rootSubject || anchor.subject,
-      threadId: anchor.threadId || '',
-      emailSentId: String(anchor._id),
-      account: account.toSafeJSON(),
-      messages: messages.map((row) => row.toSafeJSON(true))
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to load conversation' });
-  }
-}
-
-/** GET /email/mailbox/:id */
-async function getUserMailboxMessage(req, res) {
-  try {
-    if (!isObjectId(req.params.id)) {
-      return res.status(400).json({ message: 'Invalid id' });
-    }
-    const row = await MailboxMessage.findOne({
-      _id: req.params.id,
-      userId: req.user.userId
-    });
-    if (!row) return res.status(404).json({ message: 'Message not found' });
-    return res.json({ message: row.toSafeJSON(true) });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to load message' });
-  }
-}
-
-/** GET /email/sent?accountId=&search=&page=&limit= */
-async function listUserSentEmails(req, res) {
-  try {
-    const { page, limit, skip } = parseMailboxPaging(req.query);
-    const filter = { userId: req.user.userId };
-    const accountId = String(req.query.accountId || '').trim();
-    if (accountId) {
-      if (!isObjectId(accountId)) {
-        return res.status(400).json({ message: 'Invalid account id' });
-      }
-      filter.accountId = accountId;
-    }
-    const searchFilter = buildMailboxSearchFilter(req.query.search);
-    if (searchFilter) Object.assign(filter, searchFilter);
-
-    const [total, rows] = await Promise.all([
-      EmailSent.countDocuments(filter),
-      EmailSent.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit)
-    ]);
-
-    return res.json({
-      page,
-      limit,
-      total,
-      emails: rows.map((r) => r.toSafeJSON())
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to list sent emails' });
-  }
-}
-
-/** GET /email/sent/:id */
-async function getUserSentEmail(req, res) {
-  try {
-    if (!isObjectId(req.params.id)) {
-      return res.status(400).json({ message: 'Invalid id' });
-    }
-    const row = await EmailSent.findOne({
-      _id: req.params.id,
-      userId: req.user.userId
-    });
-    if (!row) return res.status(404).json({ message: 'Sent email not found' });
-    return res.json({ email: row.toSafeJSON() });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to load sent email' });
-  }
-}
-
-/** POST /email/mailbox/sync — sync replies for app-started conversations only */
-async function syncUserMailbox(req, res) {
-  try {
-    const accountId = String(req.body?.accountId || '').trim();
-    if (!accountId) {
-      return res.status(400).json({ message: 'accountId is required' });
-    }
-
-    const account = await EmailAccount.findOne({
-      _id: accountId,
-      userId: req.user.userId
-    }).select('+appPasswordEnc +refreshTokenEnc +accessTokenEnc');
-    if (!account) return res.status(404).json({ message: 'Email account not found' });
-
-    if (!canFetchLifetimeForAccount(account)) {
-      return res.status(400).json({
-        message: 'Inbox sync works with Google OAuth or an app password connection.',
-        code: 'UNSUPPORTED_METHOD'
-      });
-    }
-
-    const limit = Math.min(100, Math.max(1, Number(req.body?.limit) || 40));
-    const result = await syncAppConversationsForAccount(account, { limit });
-
-    await logActivity({
-      userId: req.user.userId,
-      actorEmail: req.user?.email || '',
-      action: 'email.mailbox_sync',
-      category: 'email',
-      status: 'success',
-      message: `Synced ${result.upserted || 0} messages across ${result.conversations || 0} conversations for ${account.email}`,
-      meta: {
-        accountId: String(account._id),
-        accountEmail: account.email,
-        upserted: result.upserted || 0,
-        conversations: result.conversations || 0,
-        synced: result.synced || 0
-      },
-      req
-    });
-
-    const totalStored = await MailboxMessage.countDocuments({
-      accountId: account._id,
-      isAppConversation: true
-    });
-
-    return res.json({
-      message:
-        result.conversations > 0
-          ? `Synced ${result.upserted || 0} messages across ${result.conversations || 0} conversations`
-          : 'No conversations yet — send an email from a load row to start one',
-      upserted: result.upserted || 0,
-      synced: result.synced || 0,
-      conversations: result.conversations || 0,
-      totalStored,
-      provider: account.method === 'oauth' ? 'gmail' : 'imap'
-    });
-  } catch (error) {
-    return res.status(500).json({
-      message: error.message || 'Failed to sync conversations',
-      code: error.code || 'SYNC_FAILED'
-    });
   }
 }
 
@@ -1802,12 +1219,5 @@ module.exports = {
   resumeQueuedEmails,
   getOAuthUrl,
   getOAuthResult,
-  oauthCallback,
-  listUserMailbox,
-  listUserConversations,
-  getConversationMessages,
-  getUserMailboxMessage,
-  listUserSentEmails,
-  getUserSentEmail,
-  syncUserMailbox
+  oauthCallback
 };

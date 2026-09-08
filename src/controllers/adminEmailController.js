@@ -661,61 +661,6 @@ async function listAllEmailAccounts(req, res) {
   }
 }
 
-/** GET /admin/email/mailbox — global mailbox search across users */
-async function listAllMailboxMessages(req, res) {
-  try {
-    const { page, limit, skip } = parsePaging(req.query);
-    const search = String(req.query.search || '').trim();
-    const direction = String(req.query.direction || '').trim();
-    const filter = {};
-    if (req.query.userId && isObjectId(req.query.userId)) filter.userId = req.query.userId;
-    if (req.query.accountId && isObjectId(req.query.accountId)) {
-      filter.accountId = req.query.accountId;
-    }
-    if (direction === 'inbound' || direction === 'outbound') filter.direction = direction;
-    if (search) {
-      filter.$or = [
-        { to: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
-        { from: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
-        { subject: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') },
-        { snippet: new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }
-      ];
-    }
-
-    const [total, rows] = await Promise.all([
-      MailboxMessage.countDocuments(filter),
-      MailboxMessage.find(filter)
-        .sort({ internalDate: -1, createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .populate('userId', 'name email')
-        .populate('accountId', 'email displayName')
-    ]);
-
-    return res.json({
-      page,
-      limit,
-      total,
-      messages: rows.map((r) => ({
-        ...r.toSafeJSON(false),
-        user: r.userId
-          ? {
-              _id: String(r.userId._id || r.userId),
-              name: r.userId.name,
-              email: r.userId.email
-            }
-          : null,
-        accountEmail:
-          r.accountId && typeof r.accountId === 'object'
-            ? r.accountId.email || ''
-            : ''
-      }))
-    });
-  } catch (error) {
-    return res.status(500).json({ message: error.message || 'Failed to list mailbox' });
-  }
-}
-
 module.exports = {
   getUserDetail,
   listUserEmailAccounts,
@@ -727,7 +672,6 @@ module.exports = {
   listAllSentEmails,
   listMailboxMessages,
   getMailboxMessage,
-  listAllMailboxMessages,
   fetchLifetimeEmails,
   listActivity,
   listUserActivity,

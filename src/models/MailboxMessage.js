@@ -67,23 +67,6 @@ const mailboxMessageSchema = new mongoose.Schema(
       default: null,
       index: true
     },
-    conversationKey: {
-      type: String,
-      trim: true,
-      default: '',
-      index: true
-    },
-    emailSentId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'EmailSent',
-      default: null,
-      index: true
-    },
-    isAppConversation: {
-      type: Boolean,
-      default: false,
-      index: true
-    },
     intelligence: { type: mongoose.Schema.Types.Mixed, default: null }
   },
   { timestamps: true }
@@ -91,8 +74,7 @@ const mailboxMessageSchema = new mongoose.Schema(
 
 mailboxMessageSchema.index({ accountId: 1, providerMessageId: 1 }, { unique: true });
 mailboxMessageSchema.index({ accountId: 1, internalDate: -1 });
-mailboxMessageSchema.index({ accountId: 1, conversationKey: 1, internalDate: -1 });
-mailboxMessageSchema.index({ userId: 1, isAppConversation: 1, internalDate: -1 });
+mailboxMessageSchema.index({ userId: 1, internalDate: -1 });
 
 mailboxMessageSchema.methods.toSafeJSON = function toSafeJSON(includeBody = false) {
   const base = {
@@ -115,9 +97,6 @@ mailboxMessageSchema.methods.toSafeJSON = function toSafeJSON(includeBody = fals
     partyType: this.partyType || 'unknown',
     extractedLoadNumber: this.extractedLoadNumber || '',
     freightLoadId: this.freightLoadId ? String(this.freightLoadId) : null,
-    conversationKey: this.conversationKey || '',
-    emailSentId: this.emailSentId ? String(this.emailSentId) : null,
-    isAppConversation: Boolean(this.isAppConversation),
     createdAt: this.createdAt
   };
   if (includeBody) {

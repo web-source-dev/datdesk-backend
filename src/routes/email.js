@@ -14,14 +14,7 @@ const {
   ackClientSend,
   getOAuthUrl,
   getOAuthResult,
-  oauthCallback,
-  listUserMailbox,
-  listUserConversations,
-  getConversationMessages,
-  getUserMailboxMessage,
-  listUserSentEmails,
-  getUserSentEmail,
-  syncUserMailbox
+  oauthCallback
 } = require('../controllers/emailController');
 const { authenticateToken } = require('../middleware/auth');
 
@@ -45,13 +38,5 @@ router.delete('/templates/:id', authenticateToken, deleteTemplate);
 
 router.post('/send', authenticateToken, sendEmail);
 router.post('/send/ack', authenticateToken, ackClientSend);
-
-router.get('/mailbox', authenticateToken, listUserMailbox);
-router.get('/mailbox/:id', authenticateToken, getUserMailboxMessage);
-router.post('/mailbox/sync', authenticateToken, syncUserMailbox);
-router.get('/conversations', authenticateToken, listUserConversations);
-router.get('/conversations/:conversationKey/messages', authenticateToken, getConversationMessages);
-router.get('/sent', authenticateToken, listUserSentEmails);
-router.get('/sent/:id', authenticateToken, getUserSentEmail);
 
 module.exports = router;

@@ -51,29 +51,6 @@ const emailSentSchema = new mongoose.Schema(
       type: String,
       default: ''
     },
-    threadId: {
-      type: String,
-      trim: true,
-      default: '',
-      index: true
-    },
-    conversationKey: {
-      type: String,
-      trim: true,
-      default: '',
-      index: true
-    },
-    rootSubject: {
-      type: String,
-      trim: true,
-      default: '',
-      maxlength: 500
-    },
-    replyToEmailSentId: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: 'EmailSent',
-      default: null
-    },
     status: {
       type: String,
       enum: ['queued', 'sending', 'sent', 'failed'],
@@ -102,8 +79,7 @@ const emailSentSchema = new mongoose.Schema(
 );
 
 emailSentSchema.index({ userId: 1, createdAt: -1 });
-emailSentSchema.index({ userId: 1, accountId: 1, conversationKey: 1 });
-emailSentSchema.index({ accountId: 1, conversationKey: 1, sentAt: -1 });
+emailSentSchema.index({ accountId: 1, createdAt: -1 });
 emailSentSchema.index({ from: 1, createdAt: -1 });
 emailSentSchema.index({ status: 1, createdAt: 1 });
 
@@ -117,10 +93,6 @@ emailSentSchema.methods.toSafeJSON = function toSafeJSON() {
     body: this.body,
     method: this.method,
     messageId: this.messageId || '',
-    threadId: this.threadId || '',
-    conversationKey: this.conversationKey || '',
-    rootSubject: this.rootSubject || '',
-    replyToEmailSentId: this.replyToEmailSentId ? String(this.replyToEmailSentId) : null,
     status: this.status || 'sent',
     error: this.error || '',
     queuedAt: this.queuedAt || null,

@@ -11,7 +11,6 @@ const {
   listAllSentEmails,
   listMailboxMessages,
   getMailboxMessage,
-  listAllMailboxMessages,
   fetchLifetimeEmails,
   listActivity,
   listUserActivity,
@@ -39,7 +38,6 @@ router.get('/activity', listActivity);
 router.get('/email/accounts', listAllEmailAccounts);
 router.get('/email/sent', listAllSentEmails);
 router.get('/email/sent/:id', getSentEmail);
-router.get('/email/mailbox', listAllMailboxMessages);
 router.get('/mailbox/:id', getMailboxMessage);
 
 router.get('/freight/overview', getOverview);

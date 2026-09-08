@@ -410,15 +410,13 @@ function toBase64Url(str) {
     .replace(/=+$/g, '');
 }
 
-function buildRfc822Message({ from, to, subject, body, replyTo, inReplyTo, references }) {
+function buildRfc822Message({ from, to, subject, body, replyTo }) {
   const isHtml = /<[a-z][\s\S]*>/i.test(body);
   const lines = [
     `From: ${from}`,
     `To: ${to}`,
     `Subject: ${subject.replace(/\r?\n/g, ' ')}`,
     replyTo ? `Reply-To: ${replyTo}` : null,
-    inReplyTo ? `In-Reply-To: ${inReplyTo}` : null,
-    references ? `References: ${references}` : null,
     'MIME-Version: 1.0',
     isHtml
       ? 'Content-Type: text/html; charset="UTF-8"'
@@ -430,7 +428,7 @@ function buildRfc822Message({ from, to, subject, body, replyTo, inReplyTo, refer
   return lines.join('\r\n');
 }
 
-async function sendViaGmailApi(account, { to, subject, body, replyTo, threadId, inReplyTo, references }) {
+async function sendViaGmailApi(account, { to, subject, body, replyTo }) {
   const accessToken = await getOAuthAccessToken(account);
   const fromName = account.displayName || account.email;
   const from = `"${String(fromName).replace(/"/g, '')}" <${account.email}>`;
@@ -440,14 +438,9 @@ async function sendViaGmailApi(account, { to, subject, body, replyTo, threadId, 
       to,
       subject,
       body,
-      replyTo: replyTo || account.email,
-      inReplyTo,
-      references
+      replyTo: replyTo || account.email
     })
   );
-
-  const payload = { raw };
-  if (threadId) payload.threadId = threadId;
 
   const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST',
@@ -455,7 +448,7 @@ async function sendViaGmailApi(account, { to, subject, body, replyTo, threadId, 
       Authorization: `Bearer ${accessToken}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({ raw })
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -463,7 +456,6 @@ async function sendViaGmailApi(account, { to, subject, body, replyTo, threadId, 
   }
   return {
     messageId: data.id || data.messageId || null,
-    threadId: data.threadId || threadId || '',
     accepted: [to],
     rejected: [],
     via: 'gmail_api'
@@ -497,10 +489,10 @@ async function verifyAccountCredentials(account) {
   return true;
 }
 
-async function sendMail({ account, to, subject, body, replyTo, threadId, inReplyTo, references }) {
+async function sendMail({ account, to, subject, body, replyTo }) {
   // OAuth → Gmail REST over HTTPS (not blocked on cloud VMs)
   if (account.method === 'oauth') {
-    return sendViaGmailApi(account, { to, subject, body, replyTo, threadId, inReplyTo, references });
+    return sendViaGmailApi(account, { to, subject, body, replyTo });
   }
 
   const transport = await getTransportForAccount(account);
@@ -829,7 +821,9 @@ const SMTP_TO_IMAP_HOST = {
 
 function canFetchLifetimeForAccount(account) {
   if (!account) return false;
-  return account.method === 'oauth' || account.method === 'app_password';
+  if (account.method === 'oauth') return true;
+  if (account.method === 'app_password' || account.method === 'smtp') return true;
+  return false;
 }
 
 function resolveImapSettings(account) {
