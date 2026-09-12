@@ -16,6 +16,12 @@ const {
   getOAuthResult,
   oauthCallback
 } = require('../controllers/emailController');
+const {
+  listInboxAccounts,
+  listInboxMessages,
+  getInboxMessage,
+  syncInboxAccount
+} = require('../controllers/inboxController');
 const { authenticateToken } = require('../middleware/auth');
 
 const router = express.Router();
@@ -38,5 +44,10 @@ router.delete('/templates/:id', authenticateToken, deleteTemplate);
 
 router.post('/send', authenticateToken, sendEmail);
 router.post('/send/ack', authenticateToken, ackClientSend);
+
+router.get('/inbox/accounts', authenticateToken, listInboxAccounts);
+router.get('/inbox/messages/:id', authenticateToken, getInboxMessage);
+router.get('/inbox/:accountId/messages', authenticateToken, listInboxMessages);
+router.post('/inbox/:accountId/sync', authenticateToken, syncInboxAccount);
 
 module.exports = router;

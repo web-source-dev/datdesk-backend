@@ -4,8 +4,11 @@ const User = require('../models/User');
 const {
   countCookiesInData,
   normalizeCookiePayload,
-  resolveCookieForUser
+  resolveCookieForUser,
+  readCookieData,
+  COOKIE_META_FIELDS
 } = require('../utils/cookies');
+const { cookiePayloadEtag, etagsMatch, setCookieRevalidateHeaders } = require('../utils/cookieEtag');
 const {
   isValidCookieChannel,
   normalizeCookieChannel,
@@ -202,22 +205,51 @@ async function deleteCookie(req, res) {
 
 async function getActiveCookieForUser(req, res) {
   try {
-    const user = await User.findById(req.user.userId).populate('assignedCookieId');
+    const user = await User.findById(req.user.userId).populate({
+      path: 'assignedCookieId',
+      select: COOKIE_META_FIELDS
+    });
     if (!user) {
       return res.status(401).json({ message: 'User not found' });
     }
 
-    const resolved = await resolveCookieForUser(user);
-    if (!resolved.data) {
+    const resolved = await resolveCookieForUser(user, { includeData: false });
+    const etag = cookiePayloadEtag(resolved.cookieDoc, resolved.channel);
+    setCookieRevalidateHeaders(res, etag);
+
+    if (etagsMatch(req.headers['if-none-match'], etag)) {
+      console.log('[COOKIE] active 304', {
+        userId: String(user._id),
+        cookieId: resolved.cookieDoc?._id ? String(resolved.cookieDoc._id) : null,
+        etag
+      });
+      res.status(304);
+      return res.end();
+    }
+
+    if (!resolved.cookieDoc) {
       return res.json({
         'dat.com': { cookies: [], localStorage: {}, sessionStorage: {} },
         source: null,
-        channel: resolved.channel
+        channel: resolved.channel,
+        cookieId: null,
+        fileName: null
       });
     }
 
-    return res.json({
-      'dat.com': resolved.data['dat.com'] || {
+    const data = await readCookieData(resolved.cookieDoc);
+    if (!data) {
+      return res.json({
+        'dat.com': { cookies: [], localStorage: {}, sessionStorage: {} },
+        source: null,
+        channel: resolved.channel,
+        cookieId: resolved.cookieDoc?._id || null,
+        fileName: resolved.cookieDoc?.fileName || null
+      });
+    }
+
+    const payload = {
+      'dat.com': data['dat.com'] || {
         cookies: [],
         localStorage: {},
         sessionStorage: {}
@@ -226,7 +258,16 @@ async function getActiveCookieForUser(req, res) {
       channel: resolved.channel,
       cookieId: resolved.cookieDoc?._id || null,
       fileName: resolved.cookieDoc?.fileName || null
+    };
+
+    console.log('[COOKIE] active 200', {
+      userId: String(user._id),
+      cookieId: payload.cookieId ? String(payload.cookieId) : null,
+      etag,
+      cookies: payload['dat.com']?.cookies?.length || 0
     });
+
+    return res.json(payload);
   } catch (error) {
     console.error('[COOKIE] Get active error:', error);
     return res.status(500).json({ message: 'Internal server error' });

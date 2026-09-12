@@ -65,15 +65,23 @@ function attachMeta(data, cookieDoc) {
   return normalized;
 }
 
+const COOKIE_META_FIELDS = '_id fileName fileSize updatedAt lastUpdated filePath hasCookies cookieCount';
+
 /**
  * Serve cookie payload from MongoDB.
  * If an old record still has a disk file and no `data`, migrate it into the DB once.
  */
-async function readCookieData(cookieDoc) {
+async function readCookieData(cookieDoc, { _reloaded } = {}) {
   if (!cookieDoc) return null;
 
   if (cookieDoc.data && typeof cookieDoc.data === 'object') {
     return attachMeta(cookieDoc.data, cookieDoc);
+  }
+
+  // Meta-only queries (ETag 304 path) omit `data` — reload the full document once.
+  if (!_reloaded && cookieDoc._id) {
+    const full = await Cookie.findById(cookieDoc._id);
+    if (full) return readCookieData(full, { _reloaded: true });
   }
 
   // Legacy migration: pull once from uploads folder into MongoDB
@@ -121,13 +129,14 @@ function readCookieFile(cookieDoc) {
   return attachMeta(cookieDoc.data, cookieDoc);
 }
 
-async function getCookieByChannel(channel) {
+async function getCookieByChannel(channel, { includeData = true } = {}) {
   const activeField = getActiveFieldForChannel(channel);
-  let active = await Cookie.findOne({ [activeField]: true });
+  const withProjection = (query) => (includeData ? query : query.select(COOKIE_META_FIELDS));
+  let active = await withProjection(Cookie.findOne({ [activeField]: true }));
 
   // Legacy isActive fallback only for plan channels — not Test / Swift Solutions
   if (!active && channel !== 'test' && channel !== 'swiftSolutions') {
-    active = await Cookie.findOne({ isActive: true });
+    active = await withProjection(Cookie.findOne({ isActive: true }));
   }
 
   return active;
@@ -137,34 +146,58 @@ async function getCookieByChannel(channel) {
  * Resolve cookie for a user:
  * 1) assignedCookieId (per-user override)
  * 2) channel active cookie (plan/label)
- * Payload always comes from MongoDB `data`.
+ * Payload always comes from MongoDB `data` unless includeData is false
+ * (used to compute ETag / 304 without loading the blob).
  */
-async function resolveCookieForUser(user) {
+async function resolveCookieForUser(user, { includeData = true } = {}) {
   if (!user) {
     return { data: null, source: null, channel: null, cookieDoc: null };
   }
+
+  const channel = getCookieChannelForUser(user);
 
   if (user.assignedCookieId) {
     const assigned =
       typeof user.assignedCookieId === 'object' && user.assignedCookieId._id
         ? user.assignedCookieId
-        : await Cookie.findById(user.assignedCookieId);
+        : await (includeData
+            ? Cookie.findById(user.assignedCookieId)
+            : Cookie.findById(user.assignedCookieId).select(COOKIE_META_FIELDS));
 
     if (assigned) {
-      const data = await readCookieData(assigned);
-      if (data) {
-        return {
-          data,
-          source: 'user',
-          channel: getCookieChannelForUser(user),
-          cookieDoc: assigned
-        };
+      const assignedLooksUsed =
+        assigned.hasCookies === true ||
+        Number(assigned.fileSize) > 0 ||
+        (assigned.data && typeof assigned.data === 'object');
+
+      if (!includeData) {
+        if (assignedLooksUsed) {
+          return { data: null, source: 'user', channel, cookieDoc: assigned };
+        }
+      } else {
+        const data = await readCookieData(assigned);
+        if (data) {
+          return {
+            data,
+            source: 'user',
+            channel,
+            cookieDoc: assigned
+          };
+        }
       }
     }
   }
 
-  const channel = getCookieChannelForUser(user);
-  const cookieDoc = await getCookieByChannel(channel);
+  const cookieDoc = await getCookieByChannel(channel, { includeData });
+  if (!includeData) {
+    return {
+      data: null,
+      source: cookieDoc ? 'channel' : null,
+      channel,
+      cookieDoc: cookieDoc || null
+    };
+  }
+
   const data = await readCookieData(cookieDoc);
 
   return {
@@ -192,6 +225,7 @@ async function getActiveCookie() {
 
 module.exports = {
   COOKIES_DIR,
+  COOKIE_META_FIELDS,
   ensureCookiesDir,
   countCookiesInData,
   normalizeCookiePayload,

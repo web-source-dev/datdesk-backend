@@ -20,6 +20,8 @@ const {
   syncAllowedAccounts,
   unusableAccountMessage
 } = require('../services/emailLimits');
+const { parseAttachmentsInput, attachmentsForSend } = require('../utils/mailAttachments');
+const { stripHtml } = require('../utils/mailMime');
 const {
   applyTemplate,
   verifyAccountCredentials,
@@ -677,12 +679,12 @@ async function findSendingAccount(userId, accountId, permissions) {
   );
 }
 
-async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent = '' }) {
+async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent = '', attachments }) {
   const sent = await EmailSent.findOneAndUpdate(
     { _id: sentId, status: { $in: ['queued', 'sending'] } },
     { $set: { status: 'sending' } },
     { new: true }
-  );
+  ).select('+attachments.content');
   if (!sent) return null;
 
   const account = await EmailAccount.findOne({
@@ -734,8 +736,14 @@ async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent 
     const result = await sendMail({
       account,
       to: sent.to,
+      cc: sent.cc || '',
+      bcc: sent.bcc || '',
       subject: sent.subject,
-      body: sent.body
+      body: sent.body,
+      bodyHtml: sent.bodyHtml || '',
+      attachments: attachmentsForSend(
+        attachments && attachments.length ? attachments : sent.attachments
+      )
     });
     sent.status = 'sent';
     sent.error = '';
@@ -834,7 +842,15 @@ async function sendEmail(req, res) {
 
     let subject = String(req.body?.subject || '').trim();
     let body = String(req.body?.body || '');
+    let bodyHtml = String(req.body?.bodyHtml || '').trim();
+    const cc = String(req.body?.cc || '')
+      .trim()
+      .toLowerCase();
+    const bcc = String(req.body?.bcc || '')
+      .trim()
+      .toLowerCase();
     const templateId = req.body?.templateId;
+    const attachments = parseAttachmentsInput(req.body?.attachments);
 
     const vars = {
       email: to,
@@ -859,9 +875,17 @@ async function sendEmail(req, res) {
       body = applyTemplate(body, vars);
     }
 
-    if (!subject || !body.trim()) {
+    if (!bodyHtml && body.includes('<')) bodyHtml = body;
+    if (!body.trim() && bodyHtml) body = stripHtml(bodyHtml);
+    if (!subject || (!body.trim() && !bodyHtml.trim())) {
       return res.status(400).json({ message: 'Subject and body are required' });
     }
+
+    console.log(
+      '[email] send attachments',
+      attachments.length,
+      attachments.map((a) => `${a.filename}:${a.size || 0}`).join(', ') || 'none'
+    );
 
     const queued = await EmailSent.create({
       userId: req.user.userId,
@@ -869,8 +893,12 @@ async function sendEmail(req, res) {
       templateId: templateId || null,
       from: account.email,
       to,
+      cc,
+      bcc,
       subject,
       body,
+      bodyHtml,
+      attachments,
       method: account.method || 'unknown',
       messageId: '',
       vars,
@@ -900,31 +928,36 @@ async function sendEmail(req, res) {
               ? `"${String(account.displayName).replace(/"/g, '')}" <${account.email}>`
               : account.email,
             to,
+            cc,
+            bcc,
             subject,
-            body
+            body,
+            bodyHtml,
+            attachments: attachments.map((a) => ({
+              filename: a.filename,
+              contentType: a.contentType,
+              content: a.content
+            }))
           }
         });
       }
     }
 
-    const job = {
+    const delivered = await deliverQueuedEmail({
       sentId: queued._id,
       actorEmail: req.user.email,
       ip: req.ip,
-      userAgent: req.get('user-agent') || ''
-    };
-    setImmediate(() => {
-      deliverQueuedEmail(job).catch((err) => {
-        console.warn('[email] background send failed:', err?.message || err);
-      });
+      userAgent: req.get('user-agent') || '',
+      attachments
     });
 
     return res.json({
-      message: 'Sending',
-      queued: true,
+      message: delivered?.status === 'sent' ? 'Sent' : 'Sending',
+      queued: delivered?.status !== 'sent',
       id: String(queued._id),
       from: account.email,
-      to
+      to,
+      attachmentCount: attachments.length
     });
   } catch (error) {
     await logActivity({

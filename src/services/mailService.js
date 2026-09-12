@@ -2,6 +2,7 @@ const nodemailer = require('nodemailer');
 const dns = require('dns');
 const net = require('net');
 const { decryptSecret, encryptSecret } = require('../utils/secretCrypto');
+const { buildRawMimeBase64Url, stripHtml } = require('../utils/mailMime');
 
 // Windows / some VPS resolve IPv6 first and hang forever on SMTP.
 try {
@@ -428,19 +429,21 @@ function buildRfc822Message({ from, to, subject, body, replyTo }) {
   return lines.join('\r\n');
 }
 
-async function sendViaGmailApi(account, { to, subject, body, replyTo }) {
+async function sendViaGmailApi(account, { to, cc, bcc, subject, body, bodyHtml, replyTo, attachments }) {
   const accessToken = await getOAuthAccessToken(account);
   const fromName = account.displayName || account.email;
   const from = `"${String(fromName).replace(/"/g, '')}" <${account.email}>`;
-  const raw = toBase64Url(
-    buildRfc822Message({
-      from,
-      to,
-      subject,
-      body,
-      replyTo: replyTo || account.email
-    })
-  );
+  const raw = await buildRawMimeBase64Url({
+    from,
+    to,
+    cc,
+    bcc,
+    subject,
+    body,
+    bodyHtml,
+    replyTo: replyTo || account.email,
+    attachments
+  });
 
   const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
     method: 'POST',
@@ -489,22 +492,37 @@ async function verifyAccountCredentials(account) {
   return true;
 }
 
-async function sendMail({ account, to, subject, body, replyTo }) {
+async function sendMail({ account, to, cc, bcc, subject, body, bodyHtml, replyTo, attachments }) {
+  const html = String(bodyHtml || '').trim() || (/<[a-z][\s\S]*>/i.test(body) ? body : '');
+  const text = html ? stripHtml(html) : String(body || '');
+
   // OAuth → Gmail REST over HTTPS (not blocked on cloud VMs)
   if (account.method === 'oauth') {
-    return sendViaGmailApi(account, { to, subject, body, replyTo });
+    return sendViaGmailApi(account, { to, cc, bcc, subject, body: text, bodyHtml: html, replyTo, attachments });
   }
 
   const transport = await getTransportForAccount(account);
   try {
     const fromName = account.displayName || account.email;
+    const attach = (Array.isArray(attachments) ? attachments : [])
+      .map((a) => ({
+        filename: a.filename || a.name || 'attachment',
+        content: Buffer.isBuffer(a.content)
+          ? a.content
+          : Buffer.from(String(a.content || '').replace(/^data:[^;]+;base64,/, ''), 'base64'),
+        contentType: a.contentType || a.type || 'application/octet-stream'
+      }))
+      .filter((a) => a.content && a.content.length);
     const info = await transport.sendMail({
       from: `"${fromName.replace(/"/g, '')}" <${account.email}>`,
       to,
+      cc: cc || undefined,
+      bcc: bcc || undefined,
       subject,
-      text: body,
-      html: body.includes('<') ? body : undefined,
-      replyTo: replyTo || account.email
+      text: text || ' ',
+      html: html || undefined,
+      replyTo: replyTo || account.email,
+      attachments: attach.length ? attach : undefined
     });
     return {
       messageId: info.messageId,

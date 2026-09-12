@@ -6,6 +6,7 @@ require('dotenv').config({ path: path.join(__dirname, '..', '.env') });
 
 const express = require('express');
 const cors = require('cors');
+const compression = require('compression');
 const mongoose = require('mongoose');
 
 const authRoutes = require('./routes/auth');
@@ -44,6 +45,20 @@ app.set('trust proxy', 1);
 const corsOptions = createCorsOptions();
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
+
+app.use(
+  compression({
+    threshold: 1024,
+    level: 6,
+    filter: (req, res) => {
+      if (res.statusCode === 304 || res.statusCode === 204) return false;
+      const url = String(req.originalUrl || req.url || '');
+      if (url.includes('/update/download')) return false;
+      if (/\/extension\/[^/]+\/download/i.test(url)) return false;
+      return compression.filter(req, res);
+    }
+  })
+);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));

@@ -31,6 +31,18 @@ const emailSentSchema = new mongoose.Schema(
       lowercase: true,
       index: true
     },
+    cc: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 500
+    },
+    bcc: {
+      type: String,
+      trim: true,
+      default: '',
+      maxlength: 500
+    },
     subject: {
       type: String,
       required: true,
@@ -41,6 +53,22 @@ const emailSentSchema = new mongoose.Schema(
       type: String,
       required: true,
       maxlength: 50000
+    },
+    bodyHtml: {
+      type: String,
+      default: '',
+      maxlength: 100000
+    },
+    attachments: {
+      type: [
+        {
+          filename: { type: String, trim: true, maxlength: 200 },
+          contentType: { type: String, trim: true, maxlength: 120 },
+          size: { type: Number, default: 0 },
+          content: { type: String }
+        }
+      ],
+      default: []
     },
     method: {
       type: String,
@@ -89,8 +117,16 @@ emailSentSchema.methods.toSafeJSON = function toSafeJSON() {
     userId: this.userId ? String(this.userId) : null,
     from: this.from,
     to: this.to,
+    cc: this.cc || '',
+    bcc: this.bcc || '',
     subject: this.subject,
     body: this.body,
+    bodyHtml: this.bodyHtml || '',
+    attachments: (this.attachments || []).map((a) => ({
+      filename: a.filename,
+      contentType: a.contentType,
+      size: a.size || 0
+    })),
     method: this.method,
     messageId: this.messageId || '',
     status: this.status || 'sent',

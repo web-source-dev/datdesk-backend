@@ -26,8 +26,10 @@ const BUILTIN_ORIGINS = [
 
 const CORS_ALLOW_HEADERS = [
   'Accept',
+  'Accept-Encoding',
   'Authorization',
   'Content-Type',
+  'If-None-Match',
   'Origin',
   'X-Requested-With',
   'X-Partner-Key',
@@ -113,7 +115,7 @@ function createCorsOptions() {
       credentials: true,
       methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: allowHeadersForRequest(req),
-      exposedHeaders: ['Content-Type'],
+      exposedHeaders: ['Content-Type', 'ETag'],
       maxAge: 86400,
       optionsSuccessStatus: 204
     });
@@ -128,13 +130,20 @@ function applyCorsHeaders(req, res) {
   if (!isOriginAllowed(origin, allowed)) return;
 
   res.setHeader('Access-Control-Allow-Origin', origin);
-  res.setHeader('Vary', 'Origin');
+  const vary = res.getHeader('Vary');
+  const varyParts = String(vary || '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (!varyParts.includes('Origin')) varyParts.push('Origin');
+  res.setHeader('Vary', varyParts.join(', '));
   res.setHeader('Access-Control-Allow-Credentials', 'true');
   res.setHeader(
     'Access-Control-Allow-Methods',
     'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS'
   );
   res.setHeader('Access-Control-Allow-Headers', allowHeadersForRequest(req));
+  res.setHeader('Access-Control-Expose-Headers', 'Content-Type, ETag');
 }
 
 module.exports = {
