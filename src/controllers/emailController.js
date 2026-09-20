@@ -20,6 +20,7 @@ const {
   syncAllowedAccounts,
   unusableAccountMessage
 } = require('../services/emailLimits');
+const { emitInboxUpdate } = require('../services/inboxRealtime');
 const { parseAttachmentsInput, attachmentsForSend } = require('../utils/mailAttachments');
 const { stripHtml } = require('../utils/mailMime');
 const {
@@ -37,6 +38,19 @@ const {
 } = require('../services/mailService');
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function notifyInboxSent(userId, accountId, to, extra = {}) {
+  try {
+    emitInboxUpdate(userId, {
+      reason: extra.reason || 'sent',
+      accountId,
+      peers: [to],
+      sentId: extra.sentId
+    });
+  } catch (err) {
+    console.warn('[email] inbox realtime notify failed:', err?.message || err);
+  }
+}
 
 /** In-memory OAuth progress so the extension can leave the waiting screen on cancel. */
 const oauthResults = new Map();
@@ -751,6 +765,10 @@ async function deliverQueuedEmail({ sentId, actorEmail = '', ip = '', userAgent 
     sent.sentAt = new Date();
     sent.method = account.method || sent.method || 'unknown';
     await sent.save();
+    notifyInboxSent(sent.userId, sent.accountId, sent.to, {
+      reason: 'sent',
+      sentId: sent._id
+    });
     await logActivity({
       userId: sent.userId,
       actorEmail,
@@ -905,6 +923,10 @@ async function sendEmail(req, res) {
       status: 'queued',
       queuedAt: new Date()
     });
+    notifyInboxSent(req.user.userId, account._id, to, {
+      reason: 'sent',
+      sentId: queued._id
+    });
 
     const smtpish = account.method === 'smtp' || account.method === 'app_password';
     if (smtpish) {
@@ -950,6 +972,18 @@ async function sendEmail(req, res) {
       userAgent: req.get('user-agent') || '',
       attachments
     });
+
+    if (delivered?.status === 'failed') {
+      return res.status(502).json({
+        message: delivered.error || 'Failed to send email',
+        code: /reconnect/i.test(String(delivered.error || ''))
+          ? 'GOOGLE_RECONNECT_REQUIRED'
+          : 'EMAIL_SEND_FAILED',
+        id: String(queued._id),
+        from: account.email,
+        to
+      });
+    }
 
     return res.json({
       message: delivered?.status === 'sent' ? 'Sent' : 'Sending',
@@ -1230,6 +1264,12 @@ async function ackClientSend(req, res) {
       sent.messageId = String(req.body?.messageId || sent.messageId || '');
     }
     await sent.save();
+    if (ok) {
+      notifyInboxSent(sent.userId, sent.accountId, sent.to, {
+        reason: 'sent',
+        sentId: sent._id
+      });
+    }
     return res.json({ ok: true, status: sent.status });
   } catch (error) {
     return res.status(500).json({ message: error.message || 'Failed to update send' });

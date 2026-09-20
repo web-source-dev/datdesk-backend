@@ -251,7 +251,17 @@ async function refreshGoogleAccessToken(account) {
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.access_token) {
-    throw new Error(data.error_description || data.error || 'Failed to refresh Google token');
+    const detail = String(data.error_description || data.error || 'Failed to refresh Google token');
+    const needsReconnect = /unauthorized|invalid_client|unauthorized_client|invalid_grant|token has been expired or revoked/i.test(
+      detail
+    );
+    const error = new Error(
+      needsReconnect
+        ? `Google login for ${account.email} expired. Reconnect Gmail in Settings.`
+        : detail
+    );
+    error.code = needsReconnect ? 'GOOGLE_RECONNECT_REQUIRED' : 'GOOGLE_REFRESH_FAILED';
+    throw error;
   }
 
   account.accessTokenEnc = encryptSecret(data.access_token);
@@ -263,10 +273,10 @@ async function refreshGoogleAccessToken(account) {
   return data.access_token;
 }
 
-async function getOAuthAccessToken(account) {
+async function getOAuthAccessToken(account, { forceRefresh = false } = {}) {
   const expires = account.accessTokenExpiresAt ? new Date(account.accessTokenExpiresAt).getTime() : 0;
   const access = decryptSecret(account.accessTokenEnc);
-  if (access && expires > Date.now() + 60_000) return access;
+  if (!forceRefresh && access && expires > Date.now() + 60_000) return access;
   return refreshGoogleAccessToken(account);
 }
 
@@ -281,10 +291,12 @@ async function createOAuthTransport(account) {
     auth: {
       type: 'OAuth2',
       user: account.email,
-      clientId,
-      clientSecret,
-      refreshToken,
-      accessToken
+      accessToken,
+      // Only attach refresh credentials when they belong to this server's Google app.
+      // A refresh token from another Cloud project cannot be refreshed here.
+      ...(refreshToken && clientId && clientSecret
+        ? { clientId, clientSecret, refreshToken }
+        : {})
     },
     connectionTimeout: 30_000,
     greetingTimeout: 30_000,
@@ -429,8 +441,49 @@ function buildRfc822Message({ from, to, subject, body, replyTo }) {
   return lines.join('\r\n');
 }
 
+async function sendViaOauthSmtp(account, { to, cc, bcc, subject, body, bodyHtml, replyTo, attachments }) {
+  const transport = await createOAuthTransport(account);
+  try {
+    const fromName = account.displayName || account.email;
+    const attach = (Array.isArray(attachments) ? attachments : [])
+      .map((a) => ({
+        filename: a.filename || a.name || 'attachment',
+        content: Buffer.isBuffer(a.content)
+          ? a.content
+          : Buffer.from(String(a.content || '').replace(/^data:[^;]+;base64,/, ''), 'base64'),
+        contentType: a.contentType || a.type || 'application/octet-stream'
+      }))
+      .filter((a) => a.content && a.content.length);
+    const info = await transport.sendMail({
+      from: `"${String(fromName).replace(/"/g, '')}" <${account.email}>`,
+      to,
+      cc: cc || undefined,
+      bcc: bcc || undefined,
+      subject,
+      text: body || ' ',
+      html: bodyHtml || undefined,
+      replyTo: replyTo || account.email,
+      attachments: attach.length ? attach : undefined
+    });
+    return {
+      messageId: info.messageId,
+      accepted: info.accepted || [],
+      rejected: info.rejected || [],
+      via: 'oauth_smtp'
+    };
+  } catch (err) {
+    throw formatSmtpError(err);
+  } finally {
+    try {
+      transport.close();
+    } catch {
+      // ignore
+    }
+  }
+}
+
 async function sendViaGmailApi(account, { to, cc, bcc, subject, body, bodyHtml, replyTo, attachments }) {
-  const accessToken = await getOAuthAccessToken(account);
+  let accessToken = await getOAuthAccessToken(account);
   const fromName = account.displayName || account.email;
   const from = `"${String(fromName).replace(/"/g, '')}" <${account.email}>`;
   const raw = await buildRawMimeBase64Url({
@@ -445,17 +498,26 @@ async function sendViaGmailApi(account, { to, cc, bcc, subject, body, bodyHtml, 
     attachments
   });
 
-  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${accessToken}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({ raw })
-  });
+  const postSend = (token) =>
+    fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ raw })
+    });
+
+  let res = await postSend(accessToken);
+  if (res.status === 401) {
+    accessToken = await getOAuthAccessToken(account, { forceRefresh: true });
+    res = await postSend(accessToken);
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
-    throw new Error(data?.error?.message || `Gmail API send failed (${res.status})`);
+    const apiMessage = data?.error?.message || `Gmail API send failed (${res.status})`;
+    console.warn('[email] Gmail API send failed', res.status, apiMessage);
+    throw new Error(apiMessage);
   }
   return {
     messageId: data.id || data.messageId || null,
@@ -496,9 +558,39 @@ async function sendMail({ account, to, cc, bcc, subject, body, bodyHtml, replyTo
   const html = String(bodyHtml || '').trim() || (/<[a-z][\s\S]*>/i.test(body) ? body : '');
   const text = html ? stripHtml(html) : String(body || '');
 
-  // OAuth → Gmail REST over HTTPS (not blocked on cloud VMs)
   if (account.method === 'oauth') {
-    return sendViaGmailApi(account, { to, cc, bcc, subject, body: text, bodyHtml: html, replyTo, attachments });
+    let apiErr;
+    try {
+      return await sendViaGmailApi(account, {
+        to,
+        cc,
+        bcc,
+        subject,
+        body: text,
+        bodyHtml: html,
+        replyTo,
+        attachments
+      });
+    } catch (err) {
+      apiErr = err;
+      if (err?.code === 'GOOGLE_RECONNECT_REQUIRED') throw err;
+      console.warn('[email] Gmail API send failed, trying SMTP OAuth:', String(err?.message || err).slice(0, 180));
+    }
+    try {
+      return await sendViaOauthSmtp(account, {
+        to,
+        cc,
+        bcc,
+        subject,
+        body: text,
+        bodyHtml: html,
+        replyTo,
+        attachments
+      });
+    } catch (smtpErr) {
+      if (apiErr?.code === 'GOOGLE_RECONNECT_REQUIRED') throw apiErr;
+      throw smtpErr;
+    }
   }
 
   const transport = await getTransportForAccount(account);
@@ -1182,6 +1274,39 @@ async function fetchImapMessagesBatch(account, { maxMessages = 100, pageToken = 
 /**
  * Unified lifetime mailbox fetch: OAuth → Gmail API, else → IMAP.
  */
+async function getGmailProfile(account) {
+  const accessToken = await getOAuthAccessToken(account);
+  const res = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/profile', {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Gmail profile failed (${res.status})`);
+  }
+  return data;
+}
+
+async function listGmailHistory(account, startHistoryId) {
+  const accessToken = await getOAuthAccessToken(account);
+  const params = new URLSearchParams({
+    startHistoryId: String(startHistoryId),
+    historyTypes: 'messageAdded'
+  });
+  const res = await fetch(`https://gmail.googleapis.com/gmail/v1/users/me/history?${params}`, {
+    headers: { Authorization: `Bearer ${accessToken}` }
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 404) {
+    const err = new Error('Gmail historyId expired');
+    err.code = 'HISTORY_EXPIRED';
+    throw err;
+  }
+  if (!res.ok) {
+    throw new Error(data?.error?.message || `Gmail history failed (${res.status})`);
+  }
+  return data;
+}
+
 async function fetchMailboxMessagesBatch(account, opts = {}) {
   if (account.method === 'oauth') {
     return fetchGmailMessagesBatch(account, opts);
@@ -1216,5 +1341,8 @@ module.exports = {
   canFetchLifetimeForAccount,
   resolveImapSettings,
   getOAuthAccessToken,
+  getGmailProfile,
+  listGmailHistory,
+  normalizeParsedMail,
   probeSmtpTcp
 };

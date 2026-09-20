@@ -20,6 +20,7 @@ const {
   listInboxAccounts,
   listInboxMessages,
   getInboxMessage,
+  getInboxConversation,
   syncInboxAccount
 } = require('../controllers/inboxController');
 const { authenticateToken } = require('../middleware/auth');
@@ -47,6 +48,7 @@ router.post('/send/ack', authenticateToken, ackClientSend);
 
 router.get('/inbox/accounts', authenticateToken, listInboxAccounts);
 router.get('/inbox/messages/:id', authenticateToken, getInboxMessage);
+router.get('/inbox/:accountId/conversation', authenticateToken, getInboxConversation);
 router.get('/inbox/:accountId/messages', authenticateToken, listInboxMessages);
 router.post('/inbox/:accountId/sync', authenticateToken, syncInboxAccount);
 

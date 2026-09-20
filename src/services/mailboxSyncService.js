@@ -96,7 +96,12 @@ async function syncOneAccount(account, { maxMessages = 50 } = {}) {
 
     const provider = batch.provider || (account.method === 'oauth' ? 'gmail' : 'imap');
     let upserted = 0;
+    const fresh = [];
     for (const msg of batch.messages) {
+      const existed = await MailboxMessage.exists({
+        accountId: account._id,
+        providerMessageId: msg.providerMessageId
+      });
       await MailboxMessage.findOneAndUpdate(
         { accountId: account._id, providerMessageId: msg.providerMessageId },
         {
@@ -111,6 +116,21 @@ async function syncOneAccount(account, { maxMessages = 50 } = {}) {
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
       upserted += 1;
+      if (!existed) fresh.push(msg);
+    }
+    if (fresh.length) {
+      try {
+        require('./inboxRealtime').notifyMailboxChanges({
+          userId: account.userId,
+          accountId: account._id,
+          messages: fresh,
+          reason: 'received'
+        }).catch((err) => {
+          console.warn('[mailbox-sync] realtime notify failed:', err?.message || err);
+        });
+      } catch (err) {
+        console.warn('[mailbox-sync] realtime notify failed:', err?.message || err);
+      }
     }
 
     const intel = await processUnprocessedMessages({
@@ -305,11 +325,32 @@ function stopMailboxSyncCron() {
   started = false;
 }
 
+async function syncAccountsForUser(userId, { maxMessages = 25 } = {}) {
+  if (!userId) return [];
+  const accounts = await EmailAccount.find({ userId }).sort({ updatedAt: -1 }).limit(8);
+  const results = [];
+  for (const account of accounts) {
+    if (!canFetchLifetimeForAccount(account)) continue;
+    try {
+      results.push(await syncOneAccount(account, { maxMessages }));
+    } catch (err) {
+      results.push({
+        error: true,
+        accountId: String(account._id),
+        email: account.email,
+        message: err?.message || String(err)
+      });
+    }
+  }
+  return results;
+}
+
 module.exports = {
   startMailboxSyncCron,
   stopMailboxSyncCron,
   runMailboxSyncTick,
   syncOneAccount,
+  syncAccountsForUser,
   getMailboxSyncStatus,
   getSyncConfig
 };

@@ -1,4 +1,5 @@
 const path = require('path');
+const http = require('http');
 const fs = require('fs');
 
 // Always load backend/.env (not process.cwd()) so pm2 / systemd / other CWDs still work.
@@ -30,6 +31,8 @@ const {
   googleOAuthMissingKeys
 } = require('./services/mailService');
 const { startMailboxSyncCron } = require('./services/mailboxSyncService');
+const { startMailboxWatch } = require('./services/mailboxWatchService');
+const { attachInboxRealtime } = require('./services/inboxRealtime');
 const { resumeQueuedEmails } = require('./controllers/emailController');
 const { createCorsOptions, applyCorsHeaders } = require('./utils/corsOrigins');
 const { isTooLargeError, tooLargeMessage } = require('./utils/uploadLimits');
@@ -148,8 +151,16 @@ async function start() {
     );
   }
 
-  app.listen(PORT, () => {
+  const server = http.createServer(app);
+  attachInboxRealtime(server);
+
+  server.listen(PORT, () => {
     console.log(`[SERVER] Dat Desk backend listening on http://localhost:${PORT}`);
+    try {
+      startMailboxWatch();
+    } catch (err) {
+      console.warn('[mailbox-watch] failed to start:', err?.message || err);
+    }
     try {
       startMailboxSyncCron();
     } catch (err) {

@@ -24,15 +24,35 @@ function buildProxyFields(body) {
 
 async function listProxies(_req, res) {
   try {
-    const [proxies, settings] = await Promise.all([
+    const [proxies, settings, userCounts] = await Promise.all([
       Proxy.find().sort({ createdAt: -1 }),
-      getAppSettings()
+      getAppSettings(),
+      User.aggregate([
+        {
+          $match: {
+            role: { $ne: 'admin' },
+            isBanned: { $ne: true },
+            proxyId: { $ne: null }
+          }
+        },
+        { $group: { _id: '$proxyId', count: { $sum: 1 } } }
+      ])
     ]);
 
     await settings.populate('globalProxyId');
 
+    const countByProxyId = Object.fromEntries(
+      userCounts.map((row) => [String(row._id), row.count])
+    );
+
     return res.json({
-      proxies: proxies.map((p) => p.toSafeJSON()),
+      proxies: proxies.map((p) => {
+        const safe = p.toSafeJSON();
+        return {
+          ...safe,
+          activeUserCount: countByProxyId[String(p._id)] || 0
+        };
+      }),
       settings: {
         globalProxyEnabled: settings.globalProxyEnabled,
         globalProxyId: settings.globalProxyId?._id || settings.globalProxyId || null,

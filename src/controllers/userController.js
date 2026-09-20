@@ -6,6 +6,7 @@ const { resolveCookieForUser } = require('../utils/cookies');
 const { getCookieChannelForUser } = require('../utils/cookieChannels');
 const { normalizePermissions, getEnabledCustomTabs } = require('../utils/permissions');
 const { syncAllowedAccounts } = require('../services/emailLimits');
+const { assignLeastLoadedProxyForUser } = require('../utils/proxyLoadBalance');
 
 function normalizePlan(plan) {
   const p = String(plan || 'single').trim().toLowerCase();
@@ -203,11 +204,18 @@ async function createUser(req, res) {
         message: 'Admin accounts can only be created directly in the database'
       });
     }
+    const nextPlan = normalizePlan(plan);
+    const nextLabel = String(label || '').trim();
+
     let nextProxyId = null;
     if (proxyId) {
       const p = await Proxy.findById(proxyId);
       if (!p) return res.status(404).json({ message: 'Assigned proxy not found' });
       nextProxyId = p._id;
+    } else {
+      // Auto least-load across working proxies (reserved never for Swift Solutions)
+      const auto = await assignLeastLoadedProxyForUser({ plan: nextPlan, label: nextLabel });
+      if (auto) nextProxyId = auto._id;
     }
 
     let nextCookieId = null;
@@ -223,8 +231,8 @@ async function createUser(req, res) {
       password,
       role: nextRole,
       domain: domain || 'https://one.dat.com/search-loads',
-      plan: normalizePlan(plan),
-      label: String(label || '').trim(),
+      plan: nextPlan,
+      label: nextLabel,
       assignedCookieId: nextCookieId,
       proxyId: nextProxyId,
       proxy: '',
