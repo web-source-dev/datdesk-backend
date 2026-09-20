@@ -2,32 +2,17 @@
 
 /**
  * Least-load proxy assignment for Dat Desk users.
- * Uses the shared working-proxy pool from DATHUB/backend/config/working-proxies.js
  */
 
-const path = require('path');
 const Proxy = require('../models/Proxy');
 const User = require('../models/User');
-
-const workingProxies = require(path.join(
-  __dirname,
-  '..',
-  '..',
-  '..',
-  '..',
-  'DATHUB',
-  'backend',
-  'config',
-  'working-proxies.js'
-));
-
 const {
   WORKING_KEYS,
   RESERVED_KEYS,
   canUseReservedProxies,
   pickLeastLoadedSlot,
   isSwiftSolutionsUser
-} = workingProxies;
+} = require('../../config/working-proxies');
 
 async function getWorkingProxyDocs() {
   const enabled = await Proxy.find({ enabled: true }).lean();
@@ -77,13 +62,12 @@ async function assignLeastLoadedProxyForUser(userLike = {}) {
     meta: d
   }));
 
-  // Swift must never land on reserved
   const user = {
     label: userLike.label,
     plan: userLike.plan
   };
   if (isSwiftSolutionsUser(user) && !canUseReservedProxies(user)) {
-    // already handled inside pickLeastLoadedSlot
+    // reserved exclusion handled in pickLeastLoadedSlot
   }
 
   const picked = pickLeastLoadedSlot(slots, user, RESERVED_KEYS);
