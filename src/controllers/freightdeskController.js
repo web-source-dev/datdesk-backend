@@ -37,6 +37,7 @@ async function enrichSessions(sessions = []) {
       isActiveSingle: Boolean(imported?.isActiveSingle),
       isActiveDouble: Boolean(imported?.isActiveDouble),
       isActiveMulti: Boolean(imported?.isActiveMulti),
+      isActiveHorizon: Boolean(imported?.isActiveHorizon),
       isActiveSwiftSolutions: Boolean(imported?.isActiveSwiftSolutions),
       isActiveTest: Boolean(imported?.isActiveTest),
       isActive: Boolean(imported?.isActive),

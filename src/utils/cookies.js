@@ -134,8 +134,8 @@ async function getCookieByChannel(channel, { includeData = true } = {}) {
   const withProjection = (query) => (includeData ? query : query.select(COOKIE_META_FIELDS));
   let active = await withProjection(Cookie.findOne({ [activeField]: true }));
 
-  // Legacy isActive fallback only for plan channels — not Test / Swift Solutions
-  if (!active && channel !== 'test' && channel !== 'swiftSolutions') {
+  // Legacy isActive fallback only for plan channels — not Test / Swift Solutions / Horizon
+  if (!active && channel !== 'test' && channel !== 'swiftSolutions' && channel !== 'horizon') {
     active = await withProjection(Cookie.findOne({ isActive: true }));
   }
 
@@ -216,6 +216,7 @@ async function getActiveCookie() {
       { isActiveSingle: true },
       { isActiveDouble: true },
       { isActiveMulti: true },
+      { isActiveHorizon: true },
       { isActiveSwiftSolutions: true },
       { isActiveTest: true }
     ]

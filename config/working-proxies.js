@@ -4,8 +4,10 @@
  * Working-proxy pool for Dat Desk (kept in-repo so Render deploys don't depend on DATHUB).
  * Keep in sync with DATHUB/backend/config/working-proxies.js
  *
- * RESERVED_FOR_HORIZON_MULTI — never assign to swiftSolutions users.
- * Prefer these for label=horizon and plan=multi users.
+ * RESERVED_FOR_HORIZON — exclusively for label=horizon users. Never assigned to
+ * any other user (swiftSolutions, plain multi-plan, etc.) — least-loaded
+ * assignment and manual reassignment both exclude these unless the user is
+ * label=horizon.
  */
 
 const WORKING_PROXIES = [
@@ -21,12 +23,14 @@ const WORKING_PROXIES = [
   '192.53.66.22:6128:xsoekzgl:lr6bf988aq2h',
   '192.53.70.225:5939:xsoekzgl:lr6bf988aq2h',
   '192.53.138.53:5991:xsoekzgl:lr6bf988aq2h',
-  '193.160.83.238:6559:xsoekzgl:lr6bf988aq2h'
+  '193.160.83.238:6559:xsoekzgl:lr6bf988aq2h',
+  '192.53.137.7:6295:tijcgtqh:fb62vy5f7xqq'
 ];
 
-const RESERVED_FOR_HORIZON_MULTI = [
+const RESERVED_FOR_HORIZON = [
+  '192.53.137.7:6295:tijcgtqh:fb62vy5f7xqq',
   '161.77.203.94:12323:14a143f3a436b:ae2f1456b9',
-  '161.77.175.86:12323:14a143f3a436b:ae2f1456b9',
+  '193.160.83.238:6559:xsoekzgl:lr6bf988aq2h',
   '64.84.117.208:12323:14a143f3a436b:ae2f1456b9'
 ];
 
@@ -52,7 +56,7 @@ function hostPortKey(line) {
 }
 
 const WORKING_KEYS = new Set(WORKING_PROXIES.map(hostPortKey).filter(Boolean));
-const RESERVED_KEYS = new Set(RESERVED_FOR_HORIZON_MULTI.map(hostPortKey).filter(Boolean));
+const RESERVED_KEYS = new Set(RESERVED_FOR_HORIZON.map(hostPortKey).filter(Boolean));
 
 function isSwiftSolutionsUser(user) {
   return String(user?.label || '').trim().toLowerCase() === 'swiftsolutions';
@@ -66,9 +70,9 @@ function isMultiPlanUser(user) {
   return String(user?.plan || '').trim().toLowerCase() === 'multi';
 }
 
+/** Reserved proxies are exclusively for label=horizon users — no one else, regardless of plan. */
 function canUseReservedProxies(user) {
-  if (isSwiftSolutionsUser(user)) return false;
-  return isHorizonUser(user) || isMultiPlanUser(user);
+  return isHorizonUser(user);
 }
 
 function pickLeastLoadedSlot(slots, user, reservedKeys = RESERVED_KEYS) {
@@ -101,7 +105,7 @@ function pickLeastLoadedSlot(slots, user, reservedKeys = RESERVED_KEYS) {
 
 module.exports = {
   WORKING_PROXIES,
-  RESERVED_FOR_HORIZON_MULTI,
+  RESERVED_FOR_HORIZON,
   WORKING_KEYS,
   RESERVED_KEYS,
   parseProxyLine,

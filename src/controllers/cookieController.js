@@ -86,6 +86,7 @@ async function uploadCookie(req, res) {
       isActiveSingle: false,
       isActiveDouble: false,
       isActiveMulti: false,
+      isActiveHorizon: false,
       isActiveSwiftSolutions: false,
       isActiveTest: false
     });
@@ -110,7 +111,7 @@ async function activateCookie(req, res) {
     const rawChannel = req.body.channel || 'single';
     if (!isValidCookieChannel(rawChannel)) {
       return res.status(400).json({
-        message: 'Invalid channel. Use single, double, multi, swiftSolutions, or test.'
+        message: 'Invalid channel. Use single, double, multi, horizon, swiftSolutions, or test.'
       });
     }
     const channel = normalizeCookieChannel(rawChannel);
@@ -150,7 +151,7 @@ async function deactivateCookie(req, res) {
     const rawChannel = req.body.channel || 'single';
     if (!isValidCookieChannel(rawChannel)) {
       return res.status(400).json({
-        message: 'Invalid channel. Use single, double, multi, swiftSolutions, or test.'
+        message: 'Invalid channel. Use single, double, multi, horizon, swiftSolutions, or test.'
       });
     }
     const channel = normalizeCookieChannel(rawChannel);

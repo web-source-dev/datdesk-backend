@@ -1,10 +1,12 @@
 const SWIFT_SOLUTIONS_LABEL = 'swiftSolutions';
 const TEST_LABEL = 'test';
+const HORIZON_LABEL = 'horizon';
 
 const COOKIE_CHANNELS = {
   SINGLE: 'single',
   DOUBLE: 'double',
   MULTI: 'multi',
+  HORIZON: 'horizon',
   SWIFT_SOLUTIONS: 'swiftSolutions',
   TEST: 'test'
 };
@@ -13,6 +15,7 @@ const CHANNEL_ACTIVE_FIELD = {
   [COOKIE_CHANNELS.SINGLE]: 'isActiveSingle',
   [COOKIE_CHANNELS.DOUBLE]: 'isActiveDouble',
   [COOKIE_CHANNELS.MULTI]: 'isActiveMulti',
+  [COOKIE_CHANNELS.HORIZON]: 'isActiveHorizon',
   [COOKIE_CHANNELS.SWIFT_SOLUTIONS]: 'isActiveSwiftSolutions',
   [COOKIE_CHANNELS.TEST]: 'isActiveTest'
 };
@@ -21,6 +24,7 @@ const CHANNEL_LABELS = {
   single: 'Single',
   double: 'Double',
   multi: 'Multi',
+  horizon: 'Horizon',
   swiftSolutions: 'Swift Solutions',
   test: 'Test'
 };
@@ -33,6 +37,7 @@ function normalizeCookieChannel(channel) {
     return COOKIE_CHANNELS.SWIFT_SOLUTIONS;
   }
   if (lower === 'test') return COOKIE_CHANNELS.TEST;
+  if (lower === 'horizon') return COOKIE_CHANNELS.HORIZON;
   if (lower === 'double') return COOKIE_CHANNELS.DOUBLE;
   if (lower === 'multi') return COOKIE_CHANNELS.MULTI;
   if (lower === 'single') return COOKIE_CHANNELS.SINGLE;
@@ -50,6 +55,7 @@ function isValidCookieChannel(channel) {
     lower === 'single' ||
     lower === 'double' ||
     lower === 'multi' ||
+    lower === 'horizon' ||
     lower === 'test' ||
     lower === 'swift' ||
     lower === 'swiftsolutions' ||
@@ -64,6 +70,7 @@ function getActiveFieldForChannel(channel) {
 /**
  * label=test → test channel
  * label=swiftSolutions → Swift Solutions channel
+ * label=horizon → Horizon channel (separate from Dat Desk / Smart Dat plan channels)
  * otherwise → plan (single|double|multi)
  */
 function getCookieChannelForUser(user) {
@@ -80,6 +87,8 @@ function getCookieChannelForUser(user) {
     return COOKIE_CHANNELS.SWIFT_SOLUTIONS;
   }
 
+  if (label === HORIZON_LABEL) return COOKIE_CHANNELS.HORIZON;
+
   const plan = String(user?.plan || 'single')
     .trim()
     .toLowerCase();
@@ -91,6 +100,7 @@ function getCookieChannelForUser(user) {
 module.exports = {
   SWIFT_SOLUTIONS_LABEL,
   TEST_LABEL,
+  HORIZON_LABEL,
   COOKIE_CHANNELS,
   CHANNEL_ACTIVE_FIELD,
   CHANNEL_LABELS,
