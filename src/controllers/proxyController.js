@@ -1,7 +1,10 @@
 const Proxy = require('../models/Proxy');
 const User = require('../models/User');
 const { getAppSettings, resolveProxyForUser, proxyDocToString } = require('../utils/proxyResolve');
-const { isValidProxy, formatProxy } = require('../utils/proxy');
+const { isValidProxy, formatProxy, parseProxy } = require('../utils/proxy');
+const { isProxyEnabled } = require('../utils/permissions');
+const { listFailoverCandidates } = require('../utils/proxyLoadBalance');
+const { logActivity } = require('../services/activityLogService');
 
 function buildProxyFields(body) {
   const host = String(body.host || '').trim();
@@ -60,7 +63,8 @@ async function listProxies(_req, res) {
           ? typeof settings.globalProxyId.toSafeJSON === 'function'
             ? settings.globalProxyId.toSafeJSON()
             : settings.globalProxyId
-          : null
+          : null,
+        blockDatTrackers: settings.blockDatTrackers !== false
       }
     });
   } catch (error) {
@@ -135,7 +139,11 @@ async function deleteProxy(req, res) {
 async function updateProxySettings(req, res) {
   try {
     const settings = await getAppSettings();
-    const { globalProxyEnabled, globalProxyId } = req.body;
+    const { globalProxyEnabled, globalProxyId, blockDatTrackers } = req.body;
+
+    if (blockDatTrackers !== undefined) {
+      settings.blockDatTrackers = !!blockDatTrackers;
+    }
 
     if (globalProxyId !== undefined) {
       if (!globalProxyId) {
@@ -169,7 +177,8 @@ async function updateProxySettings(req, res) {
           ? typeof settings.globalProxyId.toSafeJSON === 'function'
             ? settings.globalProxyId.toSafeJSON()
             : settings.globalProxyId
-          : null
+          : null,
+        blockDatTrackers: settings.blockDatTrackers !== false
       },
       message: 'Proxy settings updated'
     });
@@ -217,7 +226,111 @@ async function getResolvedProxy(req, res) {
   }
 }
 
+function proxyAddress(value) {
+  const parsed = parseProxy(value);
+  return parsed ? `${parsed.host}:${parsed.port}`.toLowerCase() : '';
+}
+
+function triedSet(body) {
+  return new Set((Array.isArray(body?.tried) ? body.tried : []).map(proxyAddress).filter(Boolean));
+}
+
+/**
+ * Desktop: the user's proxy does not work → offer the least-loaded enabled proxy
+ * (Admin → Proxies "Enabled"; Horizon-reserved ones only for label=horizon),
+ * skipping the ones already tried. Nothing is saved until /failover/confirm.
+ * Body: { tried: ["host:port" | proxy string, ...], reason?: "ERR_…" }
+ */
+async function getFailoverProxy(req, res) {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user) return res.status(401).json({ message: 'User not found' });
+    if (!isProxyEnabled(user.permissions)) {
+      return res.status(400).json({ success: false, message: 'Proxy is disabled for this account' });
+    }
+
+    const tried = triedSet(req.body);
+    const reason = String(req.body?.reason || '').slice(0, 60);
+    const [pick] = await listFailoverCandidates(user, tried);
+
+    if (!pick) {
+      await logActivity({
+        userId: user._id,
+        actorEmail: user.email,
+        action: 'proxy.failover',
+        category: 'system',
+        status: 'failure',
+        message: `Proxy not working for ${user.email} (${[...tried].join(', ') || 'unknown'}${
+          reason ? `, ${reason}` : ''
+        }) — no other enabled proxy left`,
+        meta: { tried: [...tried], reason },
+        req
+      });
+      return res.status(404).json({ success: false, message: 'No other enabled proxy available' });
+    }
+
+    return res.json({
+      success: true,
+      proxy: proxyDocToString(pick),
+      source: 'failover',
+      proxyId: pick._id,
+      name: pick.name || null
+    });
+  } catch (error) {
+    console.error('[PROXY] Failover error:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
+/**
+ * Desktop: the offered proxy reached DAT → make it the user's proxy from now on
+ * (only when their proxy came from their own assignment; a custom or global
+ * proxy is left alone). Body: { proxyId, tried: [...], reason? }
+ */
+async function confirmFailoverProxy(req, res) {
+  try {
+    const user = await User.findById(req.user.userId);
+    if (!user) return res.status(401).json({ message: 'User not found' });
+
+    const tried = triedSet(req.body);
+    const reason = String(req.body?.reason || '').slice(0, 60);
+    const proxyId = String(req.body?.proxyId || '');
+    // Must still be a working proxy this user may use
+    const pick = (await listFailoverCandidates(user, tried)).find((d) => String(d._id) === proxyId);
+    if (!pick) {
+      return res.status(400).json({ success: false, message: 'Proxy is not an enabled proxy this user may use' });
+    }
+
+    const resolved = await resolveProxyForUser(user);
+    const saved = resolved.source === 'user' || resolved.source === 'legacy' || !resolved.proxy;
+    if (saved) {
+      user.proxyId = pick._id;
+      await user.save();
+    }
+
+    await logActivity({
+      userId: user._id,
+      actorEmail: user.email,
+      action: 'proxy.failover',
+      category: 'system',
+      status: 'success',
+      message: `Proxy not working for ${user.email} (${[...tried].join(', ') || 'unknown'}${
+        reason ? `, ${reason}` : ''
+      }) — switched to ${pick.name}${saved ? ' and assigned it to the user' : ` (not saved: ${resolved.source} proxy)`}`,
+      meta: { tried: [...tried], reason, proxyId: String(pick._id), saved },
+      req
+    });
+
+    return res.json({ success: true, saved, proxyId: pick._id, name: pick.name || null });
+  } catch (error) {
+    console.error('[PROXY] Failover confirm error:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
 module.exports = {
+  getFailoverProxy,
+  confirmFailoverProxy,
   listProxies,
   createProxy,
   updateProxy,

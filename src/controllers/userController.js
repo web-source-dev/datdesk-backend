@@ -1,7 +1,7 @@
 const User = require('../models/User');
 const Proxy = require('../models/Proxy');
 const Cookie = require('../models/Cookie');
-const { resolveProxyForUser } = require('../utils/proxyResolve');
+const { resolveProxyForUser, getAppSettings } = require('../utils/proxyResolve');
 const { resolveCookieForUser } = require('../utils/cookies');
 const { getCookieChannelForUser } = require('../utils/cookieChannels');
 const { normalizePermissions, getEnabledCustomTabs } = require('../utils/permissions');
@@ -17,9 +17,10 @@ function normalizePlan(plan) {
 async function enrichUser(userDoc) {
   const base = typeof userDoc.toSafeJSON === 'function' ? userDoc.toSafeJSON() : userDoc;
   const permissions = normalizePermissions(base.permissions);
-  const [resolvedProxy, resolvedCookie] = await Promise.all([
+  const [resolvedProxy, resolvedCookie, appSettings] = await Promise.all([
     resolveProxyForUser(userDoc),
-    resolveCookieForUser(userDoc)
+    resolveCookieForUser(userDoc),
+    getAppSettings()
   ]);
 
   const assignedCookie =
@@ -54,6 +55,10 @@ async function enrichUser(userDoc) {
           name: resolvedProxy.proxyDoc?.name || null
         }
       : null,
+    /** Client-side behaviour switches (desktop apps) */
+    appSettings: {
+      blockDatTrackers: appSettings?.blockDatTrackers !== false
+    },
     resolvedCookie: resolvedCookie.data
       ? {
           source: resolvedCookie.source,

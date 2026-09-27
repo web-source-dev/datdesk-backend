@@ -5,7 +5,9 @@ const {
   updateProxy,
   deleteProxy,
   updateProxySettings,
-  getResolvedProxy
+  getResolvedProxy,
+  getFailoverProxy,
+  confirmFailoverProxy
 } = require('../controllers/proxyController');
 const { authenticateToken, requireAdmin } = require('../middleware/auth');
 
@@ -13,6 +15,9 @@ const router = express.Router();
 
 // Desktop / any auth user: get my effective proxy
 router.get('/resolved', authenticateToken, getResolvedProxy);
+// Desktop: my proxy is down → offer a working one; confirm once it reached DAT
+router.post('/failover', authenticateToken, getFailoverProxy);
+router.post('/failover/confirm', authenticateToken, confirmFailoverProxy);
 
 router.get('/', authenticateToken, requireAdmin, listProxies);
 router.post('/', authenticateToken, requireAdmin, createProxy);

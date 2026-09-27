@@ -9,7 +9,9 @@ const appSettingsSchema = new mongoose.Schema(
       type: mongoose.Schema.Types.ObjectId,
       ref: 'Proxy',
       default: null
-    }
+    },
+    /** Desktop apps block DAT's analytics / chat / onboarding scripts (faster DAT) */
+    blockDatTrackers: { type: Boolean, default: true }
   },
   { timestamps: true }
 );

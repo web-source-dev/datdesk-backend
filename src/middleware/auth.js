@@ -146,10 +146,12 @@ async function authenticateToken(req, res, next) {
     };
     next();
   } catch (error) {
+    // Our own failure (e.g. database timeout), not a rejected token: a 401 here
+    // would sign every desktop client out during a brief outage.
     console.error('[AUTH] Authentication error:', error);
-    return res.status(401).json({
-      message: 'Please sign in again.',
-      code: 'AUTH_FAILED'
+    return res.status(503).json({
+      message: 'The server is temporarily unavailable. Please try again.',
+      code: 'AUTH_UNAVAILABLE'
     });
   }
 }
