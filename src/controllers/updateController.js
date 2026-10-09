@@ -47,7 +47,7 @@ function getPublicBaseUrl(req) {
 function sanitizeApp(app) {
   if (app === undefined || app === null || app === '') return '';
   const slug = String(app).toLowerCase().trim();
-  if (!/^[a-z0-9-]+$/.test(slug)) return null;
+  if (!/^[a-z0-9_-]+$/.test(slug)) return null;
   return slug;
 }
 
@@ -94,14 +94,14 @@ function listKnownApps() {
     return fs.readdirSync(UPDATE_DIR, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
       .map((entry) => entry.name)
-      .filter((name) => /^[a-z0-9-]+$/.test(name));
+      .filter((name) => /^[a-z0-9_-]+$/.test(name));
   } catch (error) {
     return [];
   }
 }
 
 /** Always expose these desktop channels in admin even before a folder exists. */
-const MANAGED_APPS = ['datdesk', 'horizon', 'swift', 'meridian', 'smartdat'];
+const MANAGED_APPS = ['datdesk', 'horizon', 'horizon_new', 'swift', 'meridian', 'smartdat'];
 
 /**
  * Get update information

@@ -114,11 +114,41 @@ const userSchema = new mongoose.Schema(
     note: { type: String, trim: true, default: '' },
     phone: { type: String, trim: true, default: '' },
     anydeskid: { type: String, trim: true, default: '' },
+    /**
+     * Bumped by an admin session push. The desktop app replaces its saved DAT
+     * profile on the next open when this is newer than the one it last applied.
+     */
+    datSessionPush: { type: Number, default: 0 },
     /** Single active desktop/admin login — new login replaces this and signs out other devices */
     activeSessionId: {
       type: String,
       default: null,
       index: true
+    },
+    /**
+     * Live desktop presence, updated by the Dat Desk app heartbeat.
+     * state: offline | dashboard | dat  (dat = the DAT window is open, even if
+     * hidden to the system tray). `datVisible` distinguishes foreground vs tray.
+     */
+    presence: {
+      state: {
+        type: String,
+        enum: ['offline', 'dashboard', 'dat'],
+        default: 'offline'
+      },
+      datOpen: { type: Boolean, default: false },
+      datVisible: { type: Boolean, default: false },
+      lastSeenAt: { type: Date, default: null, index: true },
+      datOpenedAt: { type: Date, default: null },
+      appVersion: { type: String, default: '' },
+      platform: { type: String, default: '' },
+      /** The DAT cookie/account this device currently has open — for per-cookie user counts. */
+      datCookieId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Cookie',
+        default: null,
+        index: true
+      }
     }
   },
   { timestamps: true }

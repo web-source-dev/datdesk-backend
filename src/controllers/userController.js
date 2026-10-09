@@ -7,6 +7,9 @@ const { getCookieChannelForUser } = require('../utils/cookieChannels');
 const { normalizePermissions, getEnabledCustomTabs } = require('../utils/permissions');
 const { syncAllowedAccounts } = require('../services/emailLimits');
 const { assignLeastLoadedProxyForUser } = require('../utils/proxyLoadBalance');
+const { createSessionId } = require('../utils/jwt');
+const { logActivity } = require('../services/activityLogService');
+const { presenceView } = require('./presenceController');
 
 function normalizePlan(plan) {
   const p = String(plan || 'single').trim().toLowerCase();
@@ -36,6 +39,7 @@ async function enrichUser(userDoc) {
     ...base,
     plan: normalizePlan(base.plan),
     label: base.label || '',
+    presence: presenceView(base.presence),
     permissions,
     enabledCustomTabs: getEnabledCustomTabs(permissions),
     cookieChannel: getCookieChannelForUser(userDoc),
@@ -341,4 +345,35 @@ async function deleteUser(req, res) {
   }
 }
 
-module.exports = { listUsers, createUser, updateUser, deleteUser, enrichUser };
+async function forceLogoutUser(req, res) {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (user.role === 'admin') {
+      return res.status(403).json({ message: 'Admin accounts cannot be signed out from here' });
+    }
+
+    user.activeSessionId = createSessionId();
+    await user.save({ validateBeforeSave: false });
+
+    await logActivity({
+      userId: user._id,
+      actorEmail: req.user?.email || '',
+      action: 'admin.force_logout',
+      category: 'admin',
+      status: 'success',
+      message: `Signed out ${user.email}`,
+      meta: { targetEmail: user.email },
+      req
+    });
+
+    return res.json({ message: 'User signed out' });
+  } catch (error) {
+    console.error('[USER] Force logout error:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
+module.exports = { listUsers, createUser, updateUser, deleteUser, enrichUser, forceLogoutUser };

@@ -6,6 +6,7 @@ const {
   getStatus,
   listSessions,
   importContainer,
+  importSeparate,
   importAllContainers,
   getImportAllJob,
   activateImportedCookie,
@@ -22,6 +23,7 @@ router.get('/import-all/:jobId', authenticateToken, requireAdmin, getImportAllJo
 router.patch('/label/:container', authenticateToken, requireAdmin, updateContainerLabel);
 router.patch('/working/:container', authenticateToken, requireAdmin, setWorkingStatus);
 router.post('/import/:container', authenticateToken, requireAdmin, importContainer);
+router.post('/import-separate/:container', authenticateToken, requireAdmin, importSeparate);
 router.post('/activate/:container', authenticateToken, requireAdmin, activateImportedCookie);
 
 module.exports = router;

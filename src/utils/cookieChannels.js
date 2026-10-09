@@ -67,6 +67,29 @@ function getActiveFieldForChannel(channel) {
   return CHANNEL_ACTIVE_FIELD[normalizeCookieChannel(channel)] || 'isActiveSingle';
 }
 
+const SWIFT_LABEL_MATCH = [
+  { label: 'swiftSolutions' },
+  { label: /^swift\s*solutions$/i },
+  { label: 'swift_solutions' },
+  { label: 'swift-solutions' },
+  { label: 'swift' }
+];
+
+/** Labels that route to their own cookie channel instead of the plan channel. */
+const SPECIAL_LABEL_NOR = [{ label: 'test' }, { label: 'horizon' }, ...SWIFT_LABEL_MATCH];
+
+/**
+ * Accounts whose next Open DAT reads this channel's active cookie.
+ * Test / Horizon / Swift labels are not included in a plan channel.
+ */
+function userQueryForCookieChannel(channel) {
+  const id = normalizeCookieChannel(channel);
+  if (id === COOKIE_CHANNELS.TEST) return { label: 'test' };
+  if (id === COOKIE_CHANNELS.HORIZON) return { label: 'horizon' };
+  if (id === COOKIE_CHANNELS.SWIFT_SOLUTIONS) return { $or: SWIFT_LABEL_MATCH };
+  return { plan: id, $nor: SPECIAL_LABEL_NOR };
+}
+
 /**
  * label=test → test channel
  * label=swiftSolutions → Swift Solutions channel
@@ -107,5 +130,6 @@ module.exports = {
   normalizeCookieChannel,
   isValidCookieChannel,
   getActiveFieldForChannel,
-  getCookieChannelForUser
+  getCookieChannelForUser,
+  userQueryForCookieChannel
 };

@@ -65,7 +65,8 @@ function attachMeta(data, cookieDoc) {
   return normalized;
 }
 
-const COOKIE_META_FIELDS = '_id fileName fileSize updatedAt lastUpdated filePath hasCookies cookieCount';
+const COOKIE_META_FIELDS =
+  '_id fileName fileSize updatedAt lastUpdated filePath hasCookies cookieCount userAgent proxy fingerprint authExpiresAt';
 
 /**
  * Serve cookie payload from MongoDB.
@@ -132,14 +133,39 @@ function readCookieFile(cookieDoc) {
 async function getCookieByChannel(channel, { includeData = true } = {}) {
   const activeField = getActiveFieldForChannel(channel);
   const withProjection = (query) => (includeData ? query : query.select(COOKIE_META_FIELDS));
-  let active = await withProjection(Cookie.findOne({ [activeField]: true }));
+  // Two flagged cookies can exist for a moment during activation: the newest activation wins.
+  let active = await withProjection(
+    Cookie.findOne({ [activeField]: true }).sort({ [`activatedAt.${activeField}`]: -1, updatedAt: -1 })
+  );
 
   // Legacy isActive fallback only for plan channels — not Test / Swift Solutions / Horizon
   if (!active && channel !== 'test' && channel !== 'swiftSolutions' && channel !== 'horizon') {
-    active = await withProjection(Cookie.findOne({ isActive: true }));
+    active = await withProjection(
+      Cookie.findOne({ isActive: true }).sort({ 'activatedAt.isActive': -1, updatedAt: -1 })
+    );
   }
 
   return active;
+}
+
+/**
+ * Make `cookieId` the only active cookie for `activeField` (plus legacy `isActive`).
+ * The new cookie is flagged before the others are cleared, so a client asking in
+ * between gets the new or the old session — never "no active session".
+ */
+async function setActiveCookie(cookieId, activeField, { legacy = false } = {}) {
+  const fields = legacy ? [activeField, 'isActive'] : [activeField];
+  const now = new Date();
+  const on = {};
+  for (const field of fields) {
+    on[field] = true;
+    on[`activatedAt.${field}`] = now;
+  }
+  await Cookie.updateOne({ _id: cookieId }, { $set: on });
+  await Cookie.updateMany(
+    { _id: { $ne: cookieId }, $or: fields.map((field) => ({ [field]: true })) },
+    { $set: Object.fromEntries(fields.map((field) => [field, false])) }
+  );
 }
 
 /**
@@ -232,6 +258,7 @@ module.exports = {
   normalizeCookiePayload,
   getActiveCookie,
   getCookieByChannel,
+  setActiveCookie,
   resolveCookieForUser,
   readCookieData,
   readCookieFile

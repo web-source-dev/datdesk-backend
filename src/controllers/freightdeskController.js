@@ -7,9 +7,12 @@ const {
   normalizeCookieChannel,
   isValidCookieChannel
 } = require('../utils/cookieChannels');
+const { normalizeCookiePayload } = require('../utils/cookies');
+const { sessionIdentity, shortAccountId, matchIdentities } = require('../utils/sessionIdentity');
 
 async function enrichSessions(sessions = []) {
   const enriched = [];
+  const identities = [];
 
   for (const item of sessions) {
     const container = String(item.container || '').toUpperCase();
@@ -17,6 +20,17 @@ async function enrichSessions(sessions = []) {
     const imported = status.cookie;
     const remoteCookieCount =
       item.cookieCount || item.session?.['dat.com']?.cookies?.length || 0;
+    // What "Import changed only" would do with this container right now.
+    const remotePayload = item.session ? normalizeCookiePayload(item.session) : null;
+    const plan = remotePayload
+      ? freightdeskImportService.planFdImport(imported, remotePayload, 'changed')
+      : null;
+    // Which DAT account the cookies log into: FreightDesk's copy, else the DB copy.
+    const remoteIdentity = remotePayload ? sessionIdentity(remotePayload) : null;
+    const dbIdentity = imported?.data ? sessionIdentity(imported.data) : null;
+    const identity =
+      remoteIdentity && (remoteIdentity.accountId || !dbIdentity?.accountId) ? remoteIdentity : dbIdentity;
+    if (identity) identities.push({ container, identity });
 
     enriched.push({
       container,
@@ -41,8 +55,42 @@ async function enrichSessions(sessions = []) {
       isActiveSwiftSolutions: Boolean(imported?.isActiveSwiftSolutions),
       isActiveTest: Boolean(imported?.isActiveTest),
       isActive: Boolean(imported?.isActive),
-      isWorking: Boolean(imported?.isWorking)
+      isWorking: Boolean(imported?.isWorking),
+      changeStatus: plan ? plan.status : null,
+      changeReason: plan ? plan.reason : null,
+      diff: plan ? plan.diff : null,
+      authExpiresAt: imported?.authExpiresAt || null,
+      fdImportedAt: imported?.fdImportedAt || null,
+      syncedAt: imported?.syncedAt || null,
+      syncedBy: imported?.syncedBy || '',
+      accountId: identity?.accountId || '',
+      accountShortId: shortAccountId(identity?.accountId),
+      accountEmail: identity?.email || '',
+      accountName: identity?.name || '',
+      accountPlan: identity?.plan || '',
+      accountSource: identity?.source || '',
+      // Remote (FreightDesk) vs DB (imported) account details, so the card can show both
+      // when they differ (someone pushed a different account on the same container).
+      remoteAccountShortId: shortAccountId(remoteIdentity?.accountId),
+      remoteAccountEmail: remoteIdentity?.email || '',
+      remoteAccountName: remoteIdentity?.name || '',
+      dbAccountEmail: dbIdentity?.email || '',
+      dbAccountName: dbIdentity?.name || '',
+      // FreightDesk now holds a different DAT account than the DB copy.
+      accountChanged: Boolean(
+        remoteIdentity?.accountId &&
+          dbIdentity?.accountId &&
+          remoteIdentity.accountId !== dbIdentity.accountId
+      ),
+      dbAccountShortId: shortAccountId(dbIdentity?.accountId)
     });
+  }
+
+  const matches = matchIdentities(identities);
+  for (const entry of enriched) {
+    const match = matches.get(entry.container);
+    entry.sameAccountAs = match?.sameAccountAs || [];
+    entry.sameBrowserAs = match?.sameBrowserAs || [];
   }
 
   return enriched.sort((a, b) => a.container.localeCompare(b.container));
@@ -79,7 +127,7 @@ async function importContainer(req, res) {
   try {
     const container = String(req.params.container || '').toUpperCase();
     const activate = Boolean(req.body?.activate);
-    const forceReimport = req.body?.forceReimport !== false;
+    const mode = freightdeskImportService.normalizeImportMode(req.body?.mode);
     const rawChannel = req.body?.channel || 'single';
 
     if (activate && !isValidCookieChannel(rawChannel)) {
@@ -88,28 +136,42 @@ async function importContainer(req, res) {
     const channel = normalizeCookieChannel(rawChannel);
 
     if (activate) {
-      const result = await freightdeskImportService.activateImportedCookie(container, channel);
+      const result = await freightdeskImportService.activateImportedCookie(container, channel, {
+        mode
+      });
+      const kept = result.status === 'kept-newer' || result.status === 'unchanged';
       return res.json({
         success: true,
-        message: `Imported and activated container ${container} for ${result.channelName}`,
+        message: kept
+          ? `Activated container ${container} for ${result.channelName} (kept server copy: ${result.reason})`
+          : `Imported and activated container ${container} for ${result.channelName}`,
         container,
         cookie: result.cookie,
         activated: true,
-        channel
+        channel,
+        imported: !kept,
+        status: result.status,
+        reason: result.reason,
+        diff: result.diff
       });
     }
 
-    const cookie = await freightdeskImportService.importContainerFromRemote(container, {
-      forceReimport
-    });
+    const outcome = await freightdeskImportService.importContainerFromRemote(container, { mode });
+    const imported = outcome.action === 'import';
 
     res.json({
       success: true,
-      message: `Imported container ${container}`,
+      message: imported
+        ? `Imported container ${container}`
+        : `Not imported ${container}: ${outcome.reason}`,
       container,
-      cookie: freightdeskImportService.toSafeCookie(cookie),
+      cookie: freightdeskImportService.toSafeCookie(outcome.cookie),
       activated: false,
-      channel: null
+      channel: null,
+      imported,
+      status: outcome.status,
+      reason: outcome.reason,
+      diff: outcome.diff
     });
   } catch (error) {
     console.error('[FreightDesk] importContainer error:', error);
@@ -125,7 +187,7 @@ async function importAllContainers(req, res) {
     const job = await freightdeskImportJobs.startImportAllJob({
       activate: Boolean(req.body?.activate),
       channel: req.body?.channel || 'single',
-      forceReimport: req.body?.forceReimport !== false
+      mode: freightdeskImportService.normalizeImportMode(req.body?.mode)
     });
 
     return res.status(202).json({
@@ -232,10 +294,43 @@ async function setWorkingStatus(req, res) {
   }
 }
 
+/**
+ * POST /freightdesk/import-separate/:container
+ * "Keep both": import FreightDesk's CURRENT session as a new standalone cookie without
+ * overwriting the existing imported copy. For when FreightDesk holds a different account
+ * than the DB copy and the admin wants both available on the Cookies page.
+ */
+async function importSeparate(req, res) {
+  try {
+    const container = String(req.params.container || '').toUpperCase();
+    const result = await freightdeskImportService.importContainerAsSeparate(container);
+    const safe = result.cookie.toObject();
+    delete safe.data;
+    return res.json({
+      success: true,
+      message:
+        `Added a separate cookie for container ${container}` +
+        (result.email ? ` (${result.email})` : '') +
+        '. Activate it on the Cookies page.',
+      container,
+      cookie: safe,
+      accountId: result.accountId,
+      email: result.email,
+      name: result.name
+    });
+  } catch (error) {
+    console.error('[FD] importSeparate error:', error);
+    return res
+      .status(500)
+      .json({ message: error.message || 'Failed to import container as a separate cookie' });
+  }
+}
+
 module.exports = {
   getStatus,
   listSessions,
   importContainer,
+  importSeparate,
   importAllContainers,
   getImportAllJob,
   activateImportedCookie,

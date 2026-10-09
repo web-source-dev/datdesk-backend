@@ -33,7 +33,25 @@ const cookieSchema = new mongoose.Schema(
     /** Active cookie for users with label=swiftSolutions */
     isActiveSwiftSolutions: { type: Boolean, default: false, index: true },
     isActiveTest: { type: Boolean, default: false, index: true },
-    note: { type: String, trim: true, default: '' }
+    /** When each channel flag was last turned on (key = flag name). Newest wins if two are set. */
+    activatedAt: { type: Map, of: Date, default: undefined },
+    note: { type: String, trim: true, default: '' },
+    /** User agent the session was captured with (replayed so the login looks like the same browser). */
+    userAgent: { type: String, default: '' },
+    /** Proxy bound to this account, `host:port[:user:pass]`. Every user on this account exits this IP. */
+    proxy: { type: String, default: '' },
+    /** Stable synthetic device fingerprint for this account (see utils/deviceProfile). */
+    fingerprint: { type: mongoose.Schema.Types.Mixed, default: null },
+    /** Hash of the login cookies in `data` (see utils/sessionFingerprint). */
+    sessionFingerprint: { type: String, default: '' },
+    /** Latest Auth0 login cookie expiry in `data` — newer means a fresher DAT login. */
+    authExpiresAt: { type: Date, default: null },
+    /** Hash of the payload last imported from FreightDesk (tells FD changes from Dat Desk syncs). */
+    fdFingerprint: { type: String, default: '' },
+    fdImportedAt: { type: Date, default: null },
+    /** Last time a running Dat Desk wrote a renewed session into `data`, and whose. */
+    syncedAt: { type: Date, default: null },
+    syncedBy: { type: String, trim: true, default: '' }
   },
   { timestamps: true }
 );

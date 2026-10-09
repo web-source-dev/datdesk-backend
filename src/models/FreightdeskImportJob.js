@@ -5,6 +5,7 @@ const mongoose = require('mongoose');
 const progressSchema = new mongoose.Schema(
   {
     imported: { type: Number, default: 0 },
+    skipped: { type: Number, default: 0 },
     failed: { type: Number, default: 0 },
     total: { type: Number, default: null },
     current: { type: String, default: null },
@@ -25,7 +26,7 @@ const freightdeskImportJobSchema = new mongoose.Schema(
     options: {
       activate: { type: Boolean, default: false },
       channel: { type: String, default: 'single' },
-      forceReimport: { type: Boolean, default: true }
+      mode: { type: String, enum: ['changed', 'all', 'force'], default: 'all' }
     },
     progress: { type: progressSchema, default: () => ({}) },
     result: { type: mongoose.Schema.Types.Mixed, default: null },

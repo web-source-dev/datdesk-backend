@@ -591,7 +591,7 @@ async function listActivity(req, res) {
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(limit)
-        .populate('userId', 'name email')
+        .populate('userId', 'name email role')
     ]);
 
     return res.json({
@@ -604,7 +604,8 @@ async function listActivity(req, res) {
           ? {
               _id: String(r.userId._id || r.userId),
               name: r.userId.name,
-              email: r.userId.email
+              email: r.userId.email,
+              role: r.userId.role || ''
             }
           : null
       }))

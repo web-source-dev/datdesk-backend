@@ -16,8 +16,34 @@ const {
 } = require('../utils/cookieChannels');
 const {
   normalizeCookiePayload,
-  countCookiesInData
+  countCookiesInData,
+  setActiveCookie
 } = require('../utils/cookies');
+const {
+  sessionFingerprint,
+  authExpiresAt,
+  diffSessions
+} = require('../utils/sessionFingerprint');
+const { sessionIdentity } = require('../utils/sessionIdentity');
+const { buildDeviceProfile } = require('../utils/deviceProfile');
+
+/** Stable seed for an account's device profile: its DAT account id, else the container. */
+function profileSeed(payload, container) {
+  return sessionIdentity(payload).accountId || String(container || '').toUpperCase();
+}
+
+/**
+ * Import modes:
+ *  - 'changed' import only containers whose FreightDesk cookies changed since the last import
+ *  - 'all'     import every container (default)
+ *  - 'force'   like 'all', and may also replace a newer login synced from Dat Desk
+ */
+const IMPORT_MODES = new Set(['changed', 'all', 'force']);
+
+function normalizeImportMode(mode) {
+  const raw = String(mode || '').toLowerCase();
+  return IMPORT_MODES.has(raw) ? raw : 'all';
+}
 
 const FD_CONTAINER_PREFIX = 'fd-container-';
 const IMPORT_DELAY_MS = parseInt(process.env.FREIGHTDESK_IMPORT_DELAY_MS, 10) || 750;
@@ -98,6 +124,50 @@ function toSafeCookie(cookie) {
   return obj;
 }
 
+/**
+ * Decide whether a FreightDesk payload should replace the stored cookie.
+ *
+ * Dat Desk keeps the stored cookie current (POST /cookie/sync), so the DB copy can differ
+ * from FreightDesk without FreightDesk having changed. `fdFingerprint` remembers what
+ * FreightDesk sent last time: equal → FreightDesk has nothing new. And unless forced, a
+ * payload whose Auth0 login expires earlier than the stored one never replaces it, so an
+ * import cannot roll a renewed session back to an older one.
+ *
+ * @returns {{ action: 'import'|'skip', status: string, reason: string, diff: object, fingerprint: string }}
+ */
+function planFdImport(existingCookie, payload, mode = 'all') {
+  const fingerprint = sessionFingerprint(payload);
+  const diff = diffSessions(existingCookie?.data, payload);
+  const result = (action, status, reason) => ({ action, status, reason, diff, fingerprint });
+  if (!existingCookie) return result('import', 'new', 'Not imported yet');
+
+  const storedFingerprint = existingCookie.sessionFingerprint || sessionFingerprint(existingCookie.data);
+  const lastFd = existingCookie.fdFingerprint || storedFingerprint;
+  const remoteUnchanged = Boolean(fingerprint) && fingerprint === lastFd;
+  const sameAsStored = Boolean(fingerprint) && fingerprint === storedFingerprint;
+
+  if (mode === 'changed' && remoteUnchanged) {
+    return result('skip', 'unchanged', 'FreightDesk cookies unchanged since the last import');
+  }
+  if (mode !== 'force' && !sameAsStored) {
+    const remoteExp = authExpiresAt(payload);
+    const storedExp = existingCookie.authExpiresAt || authExpiresAt(existingCookie.data);
+    if (storedExp && (!remoteExp || remoteExp < storedExp)) {
+      return result(
+        'skip',
+        'kept-newer',
+        existingCookie.syncedAt
+          ? `Server copy is newer (synced from Dat Desk ${existingCookie.syncedAt.toISOString()})`
+          : 'Server copy has a newer DAT login than FreightDesk'
+      );
+    }
+    if (remoteUnchanged && existingCookie.syncedAt) {
+      return result('skip', 'kept-newer', 'FreightDesk unchanged; server copy was synced from Dat Desk since');
+    }
+  }
+  return result('import', remoteUnchanged ? 'reimported' : 'changed', remoteUnchanged ? 'Re-imported' : 'FreightDesk cookies changed');
+}
+
 async function saveImportedCookie(container, sessionData, options = {}) {
   const normalized = String(container).toUpperCase();
   const fileName = containerFileName(normalized);
@@ -140,9 +210,32 @@ async function saveImportedCookie(container, sessionData, options = {}) {
     if (remoteLabel) cookie.label = remoteLabel;
     if (!cookie.note) cookie.note = `FreightDesk Container ${normalized}`;
   }
+  const fingerprint = sessionFingerprint(payload);
+  cookie.sessionFingerprint = fingerprint;
+  cookie.authExpiresAt = authExpiresAt(payload);
+  cookie.fdFingerprint = fingerprint;
+  cookie.fdImportedAt = new Date();
 
-  applyActivationFlags(cookie, preservedActivation);
-  applyWorkingFlag(cookie, preservedIsWorking);
+  // User agent, bound proxy, and a stable per-account device fingerprint travel with the
+  // session so every device replays the account as the same browser from the same IP.
+  const userAgent = String(
+    options.userAgent || payload.userAgent || existingCookie?.userAgent || ''
+  ).trim();
+  cookie.userAgent = userAgent;
+  cookie.fingerprint = buildDeviceProfile(profileSeed(payload, normalized), userAgent);
+  if (options.proxy !== undefined) {
+    cookie.proxy = String(options.proxy || '').trim();
+  }
+  // The data is FreightDesk's now, not a Dat Desk sync.
+  cookie.syncedAt = null;
+  cookie.syncedBy = '';
+
+  // An existing cookie keeps its flags as they are in the DB now: re-applying a
+  // snapshot taken earlier would undo an activation an admin made meanwhile.
+  if (!existingCookie) {
+    applyActivationFlags(cookie, preservedActivation);
+    applyWorkingFlag(cookie, preservedIsWorking);
+  }
   await cookie.save();
   return cookie;
 }
@@ -160,12 +253,104 @@ async function importContainerFromRemote(container, options = {}) {
     throw new Error(remote?.message || `FreightDesk session not found for container ${normalized}`);
   }
 
-  return saveImportedCookie(normalized, remote.session, {
+  const remoteUserAgent = String(remote.userAgent || remote.session?.userAgent || '').trim();
+  const remoteProxy = String(remote.proxy || '').trim();
+
+  const plan = planFdImport(existingCookie, normalizeCookiePayload(remote.session), normalizeImportMode(options.mode));
+  if (plan.action === 'skip') {
+    if (remote.label && existingCookie.label !== remote.label) {
+      existingCookie.label = remote.label;
+      await existingCookie.save();
+    }
+    // The cookies did not change, but the account's proxy / user agent / fingerprint might
+    // have, or be missing from an older import — refresh them so the session still replays
+    // as the same browser from the bound IP.
+    const refresh = {};
+    if (remoteUserAgent && existingCookie.userAgent !== remoteUserAgent) refresh.userAgent = remoteUserAgent;
+    if (remote.proxy !== undefined && existingCookie.proxy !== remoteProxy) refresh.proxy = remoteProxy;
+    const seed = profileSeed(normalizeCookiePayload(remote.session), normalized);
+    const nextUa = refresh.userAgent || existingCookie.userAgent || '';
+    if (refresh.userAgent || !existingCookie.fingerprint) {
+      refresh.fingerprint = buildDeviceProfile(seed, nextUa);
+    }
+    // Remember FreightDesk's current version so "changed only" does not report it again.
+    if (plan.fingerprint && existingCookie.fdFingerprint !== plan.fingerprint) {
+      refresh.fdFingerprint = plan.fingerprint;
+    }
+    if (Object.keys(refresh).length) {
+      await Cookie.updateOne({ _id: existingCookie._id }, { $set: refresh }, { timestamps: false });
+      Object.assign(existingCookie, refresh);
+    }
+    return { cookie: existingCookie, ...plan };
+  }
+
+  const cookie = await saveImportedCookie(normalized, remote.session, {
     label: remote.label,
+    userAgent: remoteUserAgent,
+    proxy: remote.proxy !== undefined ? remoteProxy : undefined,
     preservedActivation,
     preservedIsWorking,
     allowEmpty: options.allowEmpty
   });
+  return { cookie, ...plan };
+}
+
+/**
+ * Import the container's CURRENT FreightDesk session as a brand-new, standalone cookie —
+ * WITHOUT touching the existing imported cookie. Used for "keep both" when FreightDesk now
+ * holds a different account than the DB copy (someone pushed another account on the same
+ * container), so the admin can keep and activate either one. The new file does not use the
+ * `fd-container-` name, so later FD imports never overwrite it; it carries its own user
+ * agent and device fingerprint.
+ */
+async function importContainerAsSeparate(container) {
+  const normalized = String(container || '').toUpperCase();
+  const remote = await freightdeskApiService.fetchSession(normalized);
+  if (!remote?.success || !remote.session) {
+    throw new Error(remote?.message || `FreightDesk session not found for container ${normalized}`);
+  }
+  const payload = normalizeCookiePayload(remote.session);
+  const cookieCount = countCookiesInData(payload);
+  if (!cookieCount) {
+    throw new Error('No cookies in the FreightDesk session to import.');
+  }
+
+  const identity = sessionIdentity(payload);
+  const userAgent = String(remote.userAgent || remote.session?.userAgent || '').trim();
+  const proxy = String(remote.proxy || '').trim();
+  const tail = (identity.accountId ? identity.accountId.split('|').pop() : '').slice(-6);
+  const suffix = tail || Date.now().toString(36).slice(-6);
+  // Not an `fd-container-` name on purpose → FD import will never re-manage/overwrite it.
+  const fileName = `fd-copy-${normalized}-${suffix}-${Date.now()}.json`;
+  const fingerprint = buildDeviceProfile(identity.accountId || fileName, userAgent);
+
+  const cookie = await Cookie.create({
+    fileName,
+    data: payload,
+    filePath: '',
+    cookieCount,
+    hasCookies: cookieCount > 0,
+    fileSize: Buffer.byteLength(JSON.stringify(payload), 'utf8'),
+    source: 'freightdesk-copy',
+    label: remote.label || 'new',
+    userAgent,
+    proxy,
+    fingerprint,
+    sessionFingerprint: sessionFingerprint(payload),
+    authExpiresAt: authExpiresAt(payload),
+    fdFingerprint: sessionFingerprint(payload),
+    fdImportedAt: new Date(),
+    note:
+      `FreightDesk container ${normalized} — separate copy` +
+      (identity.email ? ` (${identity.email})` : identity.name ? ` (${identity.name})` : '')
+  });
+
+  return {
+    cookie,
+    accountId: identity.accountId || '',
+    email: identity.email || '',
+    name: identity.name || ''
+  };
 }
 
 async function listContainerIds() {
@@ -199,26 +384,25 @@ async function importAllContainers(options = {}) {
     };
   }
 
-  const activationSnapshot = new Map();
-  const workingSnapshot = new Map();
-  const existingFdCookies = await Cookie.find({
-    fileName: { $regex: `^${FD_CONTAINER_PREFIX}`, $options: 'i' }
-  });
-  for (const cookie of existingFdCookies) {
-    const container = parseContainerFromFileName(cookie.fileName);
-    if (container) {
-      activationSnapshot.set(container, collectActivationFlags(cookie));
-      workingSnapshot.set(container, collectWorkingFlag(cookie));
-    }
-  }
-
-  if (options.forceReimport) {
-    console.log('[FreightDesk] Force re-import: replacing each container after successful fetch');
-  }
+  const mode = normalizeImportMode(options.mode);
+  console.log(`[FreightDesk] Import all (mode: ${mode})`);
 
   const containerIds = await listContainerIds();
   const imported = [];
+  const skipped = [];
   const failed = [];
+  const record = (container, outcome) => {
+    const entry = {
+      container,
+      cookieId: outcome.cookie._id,
+      label: outcome.cookie.label,
+      hasCookies: outcome.cookie.hasCookies,
+      status: outcome.status,
+      reason: outcome.reason,
+      diff: outcome.diff
+    };
+    (outcome.action === 'import' ? imported : skipped).push(entry);
+  };
   const retryQueue = [];
   const onProgress =
     typeof options.onProgress === 'function' ? options.onProgress : null;
@@ -228,6 +412,7 @@ async function importAllContainers(options = {}) {
     try {
       await onProgress({
         imported: imported.length,
+        skipped: skipped.length,
         failed: failed.length,
         total: containerIds.length,
         phase: 'importing',
@@ -247,17 +432,7 @@ async function importAllContainers(options = {}) {
       phase: 'importing'
     });
     try {
-      const cookie = await importContainerFromRemote(container, {
-        forceReimport: Boolean(options.forceReimport),
-        preservedActivation: activationSnapshot.get(container),
-        preservedIsWorking: workingSnapshot.get(container) === true
-      });
-      imported.push({
-        container,
-        cookieId: cookie._id,
-        label: cookie.label,
-        hasCookies: cookie.hasCookies
-      });
+      record(container, await importContainerFromRemote(container, { mode }));
     } catch (err) {
       const retryable = /502|503|504|timed out|network error|overloaded/i.test(err.message || '');
       if (retryable) retryQueue.push(container);
@@ -284,17 +459,7 @@ async function importAllContainers(options = {}) {
         phase: 'retrying'
       });
       try {
-        const cookie = await importContainerFromRemote(container, {
-          forceReimport: Boolean(options.forceReimport),
-          preservedActivation: activationSnapshot.get(container),
-          preservedIsWorking: workingSnapshot.get(container) === true
-        });
-        imported.push({
-          container,
-          cookieId: cookie._id,
-          label: cookie.label,
-          hasCookies: cookie.hasCookies
-        });
+        record(container, await importContainerFromRemote(container, { mode }));
         const idx = failed.findIndex((f) => f.container === container);
         if (idx >= 0) failed.splice(idx, 1);
       } catch (err) {
@@ -313,21 +478,22 @@ async function importAllContainers(options = {}) {
   if (options.activate && imported.length) {
     const channel = normalizeCookieChannel(options.channel || 'single');
     const activeField = getActiveFieldForChannel(channel);
-    await Cookie.updateMany({}, { $set: { [activeField]: false } });
     const last = imported[imported.length - 1];
-    await Cookie.findByIdAndUpdate(last.cookieId, { $set: { [activeField]: true } });
+    await setActiveCookie(last.cookieId, activeField);
   }
 
   return {
     success: true,
+    mode,
     imported: imported.length,
+    skipped: skipped.length,
     failed: failed.length,
     total: containerIds.length,
     containers: imported,
+    skippedContainers: skipped,
     errors: failed,
-    activated: Boolean(options.activate),
-    channel: options.activate ? normalizeCookieChannel(options.channel || 'single') : null,
-    forceReimport: Boolean(options.forceReimport)
+    activated: Boolean(options.activate && imported.length),
+    channel: options.activate ? normalizeCookieChannel(options.channel || 'single') : null
   };
 }
 
@@ -359,7 +525,7 @@ async function updateContainerLabel(container, label) {
   };
 }
 
-async function activateImportedCookie(container, channelInput = 'single') {
+async function activateImportedCookie(container, channelInput = 'single', options = {}) {
   const normalized = String(container || '').toUpperCase();
 
   if (!isValidCookieChannel(channelInput)) {
@@ -372,11 +538,12 @@ async function activateImportedCookie(container, channelInput = 'single') {
   const preservedActivation = collectActivationFlags(existingCookie);
   const preservedIsWorking = collectWorkingFlag(existingCookie);
 
-  const cookie = await importContainerFromRemote(normalized, {
-    forceReimport: true,
+  const outcome = await importContainerFromRemote(normalized, {
+    mode: options.mode,
     preservedActivation,
     preservedIsWorking
   });
+  const { cookie } = outcome;
 
   if (!isCookieReady(cookie)) {
     throw new Error(
@@ -385,15 +552,17 @@ async function activateImportedCookie(container, channelInput = 'single') {
   }
 
   const activeField = getActiveFieldForChannel(channel);
-  await Cookie.updateMany({ _id: { $ne: cookie._id } }, { $set: { [activeField]: false } });
+  await setActiveCookie(cookie._id, activeField);
   cookie[activeField] = true;
-  await cookie.save();
 
   return {
     container: normalized,
     channel,
     channelName: CHANNEL_LABELS[channel] || channel,
-    cookie: toSafeCookie(cookie)
+    cookie: toSafeCookie(cookie),
+    status: outcome.status,
+    reason: outcome.reason,
+    diff: outcome.diff
   };
 }
 
@@ -417,6 +586,7 @@ module.exports = {
   findImportedCookie,
   saveImportedCookie,
   importContainerFromRemote,
+  importContainerAsSeparate,
   listContainerIds,
   importAllContainers,
   updateContainerLabel,
@@ -424,6 +594,8 @@ module.exports = {
   setWorkingStatus,
   isCookieReady,
   getImportedCookieStatus,
+  planFdImport,
+  normalizeImportMode,
   toSafeCookie,
   ASSIGNABLE_LABELS
 };

@@ -21,13 +21,14 @@ function quoteEtag(value) {
   return `"${token}"`;
 }
 
-function cookiePayloadEtag(cookieDoc, channel) {
+function cookiePayloadEtag(cookieDoc, channel, sessionPush = 0) {
+  const push = Number(sessionPush) || 0;
   if (!cookieDoc?._id) {
-    return quoteEtag(`empty-${channel || 'none'}`);
+    return quoteEtag(`empty-${channel || 'none'}-${push}`);
   }
   const ts = new Date(cookieDoc.updatedAt || cookieDoc.lastUpdated || 0).getTime() || 0;
   const size = Number(cookieDoc.fileSize) || 0;
-  return quoteEtag(`${cookieDoc._id}-${ts}-${size}`);
+  return quoteEtag(`${cookieDoc._id}-${ts}-${size}-${push}`);
 }
 
 function etagsMatch(ifNoneMatch, etag) {

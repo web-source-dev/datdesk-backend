@@ -59,9 +59,9 @@ async function startImportAllJob(options = {}) {
     options: {
       activate: Boolean(options.activate),
       channel: options.channel || 'single',
-      forceReimport: options.forceReimport !== false
+      mode: options.mode || 'all'
     },
-    progress: { imported: 0, failed: 0, total: null, current: null, phase: 'starting' },
+    progress: { imported: 0, skipped: 0, failed: 0, total: null, current: null, phase: 'starting' },
     message: 'Import started…'
   });
 
@@ -90,18 +90,19 @@ async function runJob(jobId) {
       ),
       onProgress: async (progress) => {
         const imported = progress.imported || 0;
+        const skipped = progress.skipped || 0;
         const failed = progress.failed || 0;
         const total = progress.total;
         const current = progress.current || null;
         const phase = progress.phase || 'importing';
-        const done = imported + failed;
+        const done = imported + skipped + failed;
         const message =
           total != null
             ? `Importing ${done}/${total}${current ? ` · ${current}` : ''}…`
             : `Importing${current ? ` · ${current}` : ''}…`;
 
         await patchJob(jobId, {
-          progress: { imported, failed, total, current, phase },
+          progress: { imported, skipped, failed, total, current, phase },
           message
         });
       }
@@ -119,6 +120,7 @@ async function runJob(jobId) {
 
     const message =
       `Imported ${result.imported} container(s)` +
+      (result.skipped ? `, ${result.skipped} skipped (unchanged or server copy newer)` : '') +
       (result.failed ? `, ${result.failed} failed` : '');
 
     await patchJob(jobId, {
@@ -126,6 +128,7 @@ async function runJob(jobId) {
       result,
       progress: {
         imported: result.imported || 0,
+        skipped: result.skipped || 0,
         failed: result.failed || 0,
         total: result.total || null,
         current: null,

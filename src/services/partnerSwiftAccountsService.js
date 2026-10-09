@@ -3,6 +3,7 @@ const {
   COOKIE_CHANNELS,
   getActiveFieldForChannel
 } = require('../utils/cookieChannels');
+const { setActiveCookie } = require('../utils/cookies');
 const { isPartnerSwiftSessionVisible } = require('../utils/partnerSwiftSessionFilter');
 const { PartnerSwiftConfig, CONFIG_KEY } = require('../models/PartnerSwiftConfig');
 
@@ -369,13 +370,7 @@ async function activatePartnerExtensionAccount(slot, { maskSessionNames = true }
     };
   }
 
-  await Cookie.updateMany(
-    { _id: { $ne: cookie._id } },
-    { $set: { [ACTIVE_FIELD]: false } }
-  );
-
-  cookie[ACTIVE_FIELD] = true;
-  await cookie.save();
+  await setActiveCookie(cookie._id, ACTIVE_FIELD);
 
   const refreshed = await resolvePartnerAccountCookies();
   return {

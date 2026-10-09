@@ -3,7 +3,8 @@ const {
   listUsers,
   createUser,
   updateUser,
-  deleteUser
+  deleteUser,
+  forceLogoutUser
 } = require('../controllers/userController');
 const {
   getMyProxy,
@@ -24,6 +25,7 @@ router.post('/proxy/unlock', authenticateToken, unlockProxyPanel);
 /** Admin user CRUD */
 router.get('/', authenticateToken, requireAdmin, listUsers);
 router.post('/', authenticateToken, requireAdmin, createUser);
+router.post('/:id/force-logout', authenticateToken, requireAdmin, forceLogoutUser);
 router.put('/:id', authenticateToken, requireAdmin, updateUser);
 router.delete('/:id', authenticateToken, requireAdmin, deleteUser);
 

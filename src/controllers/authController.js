@@ -85,7 +85,8 @@ async function login(req, res) {
 
     return res.json({
       ...enriched,
-      token
+      token,
+      serverTime: Date.now()
     });
   } catch (error) {
     console.error('[AUTH] Login error:', error);
@@ -115,7 +116,8 @@ async function checkSession(req, res) {
     if (user.isBanned) {
       return res.status(403).json({ message: 'Account is banned', isBanned: true });
     }
-    return res.json(await enrichUser(user));
+    // serverTime lets Dat Desk correct for a wrong PC clock (token expiry checks).
+    return res.json({ ...(await enrichUser(user)), serverTime: Date.now() });
   } catch (error) {
     console.error('[AUTH] Check session error:', error);
     return res.status(500).json({ message: 'Internal server error' });

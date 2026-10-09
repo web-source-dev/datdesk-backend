@@ -8,7 +8,9 @@ const {
   deactivateCookie,
   deleteCookie,
   getActiveCookieForUser,
-  setCookieWorking
+  setCookieWorking,
+  pushSession,
+  syncCookie
 } = require('../controllers/cookieController');
 const {
   getDashboardConfig,
@@ -31,6 +33,8 @@ const upload = multer({
 const router = express.Router();
 
 router.get('/active', authenticateToken, getActiveCookieForUser);
+router.post('/sync', authenticateToken, syncCookie);
+router.post('/push', authenticateToken, requireAdmin, pushSession);
 
 router.get(
   '/partner-swift/dashboard-config',

@@ -19,6 +19,7 @@ const updateRoutes = require('./routes/update');
 const freightdeskRoutes = require('./routes/freightdesk');
 const emailRoutes = require('./routes/email');
 const adminRoutes = require('./routes/admin');
+const presenceRoutes = require('./routes/presence');
 const partnerSwiftSolutionsRoutes = require('./routes/partnerSwiftSolutions');
 const { ensureCookiesDir } = require('./utils/cookies');
 const {
@@ -117,6 +118,7 @@ app.use('/update', updateRoutes);
 app.use('/freightdesk', freightdeskRoutes);
 app.use('/email', emailRoutes);
 app.use('/admin', adminRoutes);
+app.use('/presence', presenceRoutes);
 app.use('/partner/swift-solutions', partnerSwiftSolutionsRoutes);
 
 // Alias used by DATGO-style clients
