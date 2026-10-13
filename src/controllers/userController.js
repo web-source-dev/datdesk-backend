@@ -9,7 +9,7 @@ const { syncAllowedAccounts } = require('../services/emailLimits');
 const { assignLeastLoadedProxyForUser } = require('../utils/proxyLoadBalance');
 const { createSessionId } = require('../utils/jwt');
 const { logActivity } = require('../services/activityLogService');
-const { presenceView } = require('./presenceController');
+const { presenceView, PRESENCE_ONLINE_WINDOW_MS } = require('./presenceController');
 
 function normalizePlan(plan) {
   const p = String(plan || 'single').trim().toLowerCase();
@@ -86,6 +86,7 @@ async function listUsers(req, res) {
     const proxy = String(req.query.proxy || '').trim().toLowerCase();
     const cookie = String(req.query.cookie || '').trim().toLowerCase();
     const openDat = String(req.query.openDat || '').trim().toLowerCase();
+    const presence = String(req.query.presence || '').trim().toLowerCase();
 
     const conditions = [];
 
@@ -156,6 +157,26 @@ async function listUsers(req, res) {
       });
     } else if (openDat === 'false' || openDat === '0') {
       conditions.push({ 'permissions.openDat': false });
+    }
+
+    // Live presence: "online" means a heartbeat inside the online window.
+    if (presence) {
+      const since = new Date(Date.now() - PRESENCE_ONLINE_WINDOW_MS);
+      const online = { 'presence.lastSeenAt': { $gte: since }, 'presence.state': { $ne: 'offline' } };
+      if (presence === 'online') conditions.push(online);
+      else if (presence === 'dat') conditions.push({ ...online, 'presence.state': 'dat' });
+      else if (presence === 'dat-visible') conditions.push({ ...online, 'presence.state': 'dat', 'presence.datVisible': true });
+      else if (presence === 'dat-tray') conditions.push({ ...online, 'presence.state': 'dat', 'presence.datVisible': { $ne: true } });
+      else if (presence === 'dashboard') conditions.push({ ...online, 'presence.state': 'dashboard' });
+      else if (presence === 'offline') {
+        conditions.push({
+          $or: [
+            { 'presence.lastSeenAt': { $lt: since } },
+            { 'presence.lastSeenAt': null },
+            { 'presence.state': 'offline' }
+          ]
+        });
+      }
     }
 
     const filter = conditions.length === 1 ? conditions[0] : { $and: conditions };

@@ -15,7 +15,18 @@ const deviceCommandSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['pull-cookies'],
+      enum: [
+        'pull-cookies',
+        'open-dat',
+        'close-dat',
+        'hide-dat',
+        'reload-dat',
+        'refresh-session',
+        'clear-cache',
+        'sign-out',
+        'restart-app',
+        'quit-app'
+      ],
       default: 'pull-cookies',
       index: true
     },

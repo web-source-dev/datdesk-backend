@@ -12,6 +12,59 @@ const sessionAlerts = require('../services/sessionAlerts');
 /** A device is considered online if it has beaten within this window. */
 const PRESENCE_ONLINE_WINDOW_MS = 90 * 1000;
 
+const REMOTE_ACTIONS = {
+  'open-dat': 'Open DAT',
+  'close-dat': 'Close DAT and show the dashboard',
+  'hide-dat': 'Hide DAT in the tray',
+  'reload-dat': 'Reload DAT',
+  'refresh-session': 'Refresh the DAT session',
+  'clear-cache': 'Clear the DAT cache',
+  'sign-out': 'Sign out of Dat Desk',
+  'restart-app': 'Restart Dat Desk',
+  'quit-app': 'Quit Dat Desk'
+};
+
+/** A queued action the app has not picked up in this long is dropped. */
+const COMMAND_PICKUP_MS = 10 * 60 * 1000;
+/** Once picked up, the app has this long to say how it went (Open DAT is slow). */
+const COMMAND_RUN_MS = 3 * 60 * 1000;
+
+/**
+ * Fail commands that will never finish (app quit, crashed or is an old build),
+ * so they stop blocking new requests of the same type.
+ */
+async function expireStaleCommands(filter) {
+  const now = Date.now();
+  const completedAt = new Date();
+  await DeviceCommand.updateMany(
+    { ...filter, status: 'pending', createdAt: { $lt: new Date(now - COMMAND_PICKUP_MS) } },
+    {
+      $set: {
+        status: 'error',
+        error: 'The app never picked this up. Is Dat Desk running and signed in?',
+        completedAt
+      }
+    }
+  );
+  await DeviceCommand.updateMany(
+    {
+      ...filter,
+      status: 'running',
+      $or: [
+        { deliveredAt: { $lt: new Date(now - COMMAND_RUN_MS) } },
+        { deliveredAt: null, updatedAt: { $lt: new Date(now - COMMAND_RUN_MS) } }
+      ]
+    },
+    {
+      $set: {
+        status: 'error',
+        error: 'The app took this but never said it finished.',
+        completedAt
+      }
+    }
+  );
+}
+
 function isOnline(presence) {
   if (!presence?.lastSeenAt) return false;
   return Date.now() - new Date(presence.lastSeenAt).getTime() < PRESENCE_ONLINE_WINDOW_MS;
@@ -75,6 +128,8 @@ async function heartbeat(req, res) {
     user.markModified('presence');
     await user.save({ validateBeforeSave: false });
 
+    await expireStaleCommands({ userId: user._id });
+
     // Claim pending commands for this device (flip to running so a second
     // heartbeat does not hand them out twice).
     const pending = await DeviceCommand.find({
@@ -105,6 +160,9 @@ async function heartbeat(req, res) {
  */
 async function submitCommandResult(req, res) {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ message: 'Command not found' });
+    }
     const cmd = await DeviceCommand.findById(req.params.id);
     if (!cmd) {
       return res.status(404).json({ message: 'Command not found' });
@@ -181,6 +239,17 @@ async function submitCommandResult(req, res) {
 
     cmd.status = 'done';
     await cmd.save();
+    if (REMOTE_ACTIONS[cmd.type]) {
+      await logActivity({
+        userId: cmd.userId,
+        actorEmail: cmd.requestedByEmail,
+        action: 'admin.remote_command',
+        category: 'admin',
+        status: 'success',
+        message: `${REMOTE_ACTIONS[cmd.type]} finished on the device`,
+        meta: { commandId: String(cmd._id), type: cmd.type }
+      });
+    }
     return res.json({ ok: true, command: cmd.toSafeJSON() });
   } catch (error) {
     console.error('[PRESENCE] submit result error:', error);
@@ -196,10 +265,15 @@ async function submitCommandResult(req, res) {
  */
 async function requestCookiePull(req, res) {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.userId)) {
+      return res.status(404).json({ message: 'User not found' });
+    }
     const user = await User.findById(req.params.userId).select('email presence');
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
+
+    await expireStaleCommands({ userId: user._id, type: 'pull-cookies' });
 
     // Reuse an outstanding request rather than stacking duplicates.
     const existing = await DeviceCommand.findOne({
@@ -240,9 +314,74 @@ async function requestCookiePull(req, res) {
   }
 }
 
+/**
+ * POST /presence/admin/users/:userId/command
+ * Queue a remote Dat Desk action. The signed-in app runs it on its next heartbeat.
+ * Body: { type: one of REMOTE_ACTIONS }
+ */
+async function requestDeviceCommand(req, res) {
+  try {
+    const type = String(req.body?.type || '').trim();
+    const label = REMOTE_ACTIONS[type];
+    if (!label) {
+      return res.status(400).json({ message: 'Unknown remote action' });
+    }
+    if (!mongoose.Types.ObjectId.isValid(req.params.userId)) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    const user = await User.findById(req.params.userId).select('email presence');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    await expireStaleCommands({ userId: user._id, type });
+
+    const existing = await DeviceCommand.findOne({
+      userId: user._id,
+      type,
+      status: { $in: ['pending', 'running'] }
+    }).sort({ createdAt: -1 });
+
+    const cmd =
+      existing ||
+      (await DeviceCommand.create({
+        userId: user._id,
+        type,
+        status: 'pending',
+        requestedBy: req.user.userId,
+        requestedByEmail: req.user.email || ''
+      }));
+
+    await logActivity({
+      userId: user._id,
+      actorEmail: req.user.email,
+      action: 'admin.remote_command_request',
+      category: 'admin',
+      status: 'info',
+      message: `Queued ${label} for ${user.email}`,
+      meta: { commandId: String(cmd._id), type },
+      req
+    });
+
+    return res.status(existing ? 200 : 201).json({
+      command: cmd.toSafeJSON(),
+      presence: presenceView(user.presence),
+      reused: Boolean(existing)
+    });
+  } catch (error) {
+    console.error('[PRESENCE] request command error:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
 /** GET /presence/admin/commands/:id — poll command status. */
 async function getCommand(req, res) {
   try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(404).json({ message: 'Command not found' });
+    }
+    await expireStaleCommands({ _id: req.params.id });
     const cmd = await DeviceCommand.findById(req.params.id).select('-result');
     if (!cmd) {
       return res.status(404).json({ message: 'Command not found' });
@@ -343,10 +482,45 @@ async function getLiveStatus(req, res) {
   }
 }
 
+/**
+ * GET /presence/admin/presence
+ * Small, fast snapshot of who is online right now and where (dashboard / DAT / tray).
+ * Users missing from `users` are offline. Polled every few seconds by the admin.
+ */
+async function getPresenceSnapshot(req, res) {
+  try {
+    const since = new Date(Date.now() - PRESENCE_ONLINE_WINDOW_MS);
+    const rows = await User.find({ role: { $ne: 'admin' }, 'presence.lastSeenAt': { $gte: since } })
+      .select('presence')
+      .lean();
+    const users = {};
+    const counts = { online: 0, dat: 0, datVisible: 0, datTray: 0, dashboard: 0 };
+    for (const row of rows) {
+      const view = presenceView(row.presence);
+      if (!view.online || view.state === 'offline') continue;
+      users[String(row._id)] = view;
+      counts.online += 1;
+      if (view.state === 'dat') {
+        counts.dat += 1;
+        if (view.datVisible) counts.datVisible += 1;
+        else counts.datTray += 1;
+      } else {
+        counts.dashboard += 1;
+      }
+    }
+    return res.json({ users, counts, onlineWindowMs: PRESENCE_ONLINE_WINDOW_MS, at: new Date().toISOString() });
+  } catch (error) {
+    console.error('[PRESENCE] snapshot error:', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+}
+
 module.exports = {
+  getPresenceSnapshot,
   heartbeat,
   submitCommandResult,
   requestCookiePull,
+  requestDeviceCommand,
   getCommand,
   downloadCommandResult,
   reportDead,

